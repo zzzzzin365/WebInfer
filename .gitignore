@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+
+# Build outputs (keep dist/ for npm publishing)
+# dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage
+coverage/
+
+# Playwright / E2E test output
+test-results/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+.temp/
+.vercel
+.env*.local
+
+# Personal docs (not for public repo)
+INTERVIEW_PREP.md
