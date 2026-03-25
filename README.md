@@ -1,2 +1,2 @@
 # WebInfer
-<img width="1283" height="798" alt="截屏2026-03-25 23 41 06" src="https://github.com/user-attachments/assets/7d91f22b-6243-470c-b74e-4b3967062fd4" />
+<img width="1282" height="841" alt="截屏2026-03-25 23 47 43" src="https://github.com/user-attachments/assets/f998bde7-2cc5-4eb6-ab88-ed57e914cea2" />
