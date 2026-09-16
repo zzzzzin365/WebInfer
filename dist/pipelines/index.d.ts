@@ -1,3 +1,4 @@
+import type { InferenceClient } from '../core/inference-client.js';
 /**
  * WebInfer - Pipeline Exports
  */
@@ -16,6 +17,7 @@ export { ImageSegmentationPipeline, createImageSegmentationPipeline, type ImageS
  * Pipeline options for the factory function
  */
 export interface PipelineFactoryOptions {
+    engine?: InferenceClient;
     /** Model ID or URL */
     model?: string;
     /** Runtime to use */
@@ -73,4 +75,5 @@ export declare function pipeline<T extends keyof PipelineTaskMap>(task: T, optio
 export declare function createPipelines<T extends (keyof PipelineTaskMap)[]>(tasks: T, options?: PipelineFactoryOptions): Promise<{
     [K in T[number]]: PipelineTaskMap[K];
 }>;
+export { compose, parallel, type CompositionStage, type CompositionResult, type ComposedPipeline } from './composer.js';
 //# sourceMappingURL=index.d.ts.map

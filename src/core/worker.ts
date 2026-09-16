@@ -4,7 +4,7 @@
  * Run inference in a Web Worker to avoid blocking the main thread.
  */
 
-import type { Tensor, RuntimeType } from './types.js';
+import type { Tensor, RuntimeType, TypedArray, DataType } from './types.js';
 
 // ============================================================================
 // Types
@@ -78,15 +78,25 @@ export interface WorkerPoolOptions {
  * Serialize a tensor for transfer to worker
  */
 export function serializeTensor(tensor: Tensor): SerializedTensor {
-  const data = tensor.toFloat32Array();
-  // Create a copy of the ArrayBuffer
+  const data = tensor.data;
   const buffer = new ArrayBuffer(data.byteLength);
-  new Float32Array(buffer).set(data);
+  new Uint8Array(buffer).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
   return {
     data: buffer,
     shape: [...tensor.shape],
     dtype: tensor.dtype,
   };
+}
+
+export function tensorData(serialized: SerializedTensor): TypedArray {
+  switch (serialized.dtype) {
+    case 'float32': case 'float16': return new Float32Array(serialized.data);
+    case 'int64': return new BigInt64Array(serialized.data);
+    case 'int32': return new Int32Array(serialized.data);
+    case 'int8': return new Int8Array(serialized.data);
+    case 'uint8': case 'bool': return new Uint8Array(serialized.data);
+    default: throw new Error(`Unsupported tensor dtype: ${serialized.dtype}`);
+  }
 }
 
 /**
@@ -95,8 +105,8 @@ export function serializeTensor(tensor: Tensor): SerializedTensor {
  */
 export async function deserializeTensor(serialized: SerializedTensor): Promise<Tensor> {
   const { WebInferTensor } = await import('./tensor.js');
-  const data = new Float32Array(serialized.data);
-  return new WebInferTensor(data, serialized.shape, serialized.dtype as 'float32');
+  const data = tensorData(serialized);
+  return new WebInferTensor(data, serialized.shape, serialized.dtype as DataType);
 }
 
 /**
@@ -105,10 +115,10 @@ export async function deserializeTensor(serialized: SerializedTensor): Promise<T
  */
 export function deserializeTensorSync(
   serialized: SerializedTensor,
-  TensorClass: new (data: Float32Array, shape: number[], dtype: string) => Tensor,
+  TensorClass: new (data: TypedArray, shape: number[], dtype: DataType) => Tensor,
 ): Tensor {
-  const data = new Float32Array(serialized.data);
-  return new TensorClass(data, serialized.shape, serialized.dtype);
+  const data = tensorData(serialized);
+  return new TensorClass(data, serialized.shape, serialized.dtype as DataType);
 }
 
 // ============================================================================
@@ -288,24 +298,31 @@ export class InferenceWorker {
               const inputNames = session.inputNames;
               for (let i = 0; i < inputs.length && i < inputNames.length; i++) {
                 const input = inputs[i];
-                const data = new Float32Array(input.data);
+                const constructors = { float32: Float32Array, float16: Float32Array,
+                  int64: BigInt64Array, int32: Int32Array, int8: Int8Array, uint8: Uint8Array, bool: Uint8Array };
+                const Constructor = constructors[input.dtype];
+                if (!Constructor) throw new Error('Unsupported tensor dtype: ' + input.dtype);
+                const data = new Constructor(input.data);
                 feeds[inputNames[i]] = new ort.Tensor(input.dtype, data, input.shape);
               }
               
               // Run inference
-              const results = await session.run(feeds);
+              let results;
+              try { results = await session.run(feeds); }
+              finally { Object.values(feeds).forEach(t => t.dispose?.()); }
               
               // Serialize outputs
               const outputs = [];
               for (const name of session.outputNames) {
                 const tensor = results[name];
                 outputs.push({
-                  data: tensor.data.buffer.slice(0),
+                  data: tensor.data.buffer.slice(tensor.data.byteOffset, tensor.data.byteOffset + tensor.data.byteLength),
                   shape: tensor.dims,
                   dtype: tensor.type
                 });
               }
               
+              Object.values(results).forEach(t => t.dispose?.());
               self.postMessage(
                 { id, type: 'result', payload: { outputs } },
                 outputs.map(o => o.data)
@@ -317,7 +334,7 @@ export class InferenceWorker {
               const { modelId } = payload;
               const session = models.get(modelId);
               if (session) {
-                // session.release(); // Not available in all versions
+                await session.release();
                 models.delete(modelId);
               }
               self.postMessage({ id, type: 'result', payload: { success: true } });
@@ -345,6 +362,8 @@ export class InferenceWorker {
     if (message.type === 'ready') {
       this.isReady = true;
       this.readyResolve();
+      this.pendingRequests.get(message.id)?.resolve(undefined);
+      this.pendingRequests.delete(message.id);
       return;
     }
 

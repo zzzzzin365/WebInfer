@@ -26,6 +26,18 @@
     "./tools": {
       "import": "./dist/tools/index.js",
       "types": "./dist/tools/index.d.ts"
+    },
+    "./workflows-3d": {
+      "types": "./dist/workflows-3d/index.d.ts",
+      "import": "./dist/workflows-3d/index.js"
+    },
+    "./adapters": {
+      "types": "./dist/adapters/index.d.ts",
+      "import": "./dist/adapters/index.js"
+    },
+    "./onnx-worker": {
+      "types": "./dist/adapters/onnx-worker-entry.d.ts",
+      "import": "./dist/adapters/onnx-worker-entry.js"
     }
   },
   "files": [
@@ -50,7 +62,9 @@
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
     "test:e2e": "playwright test",
-    "prepublishOnly": "npm run clean && npm run build && npm run test"
+    "prepublishOnly": "npm run clean && npm run build && npm run test",
+    "test:onnx": "npm run build && node scripts/smoke-onnx.mjs",
+    "test:worker-browser": "npm run build && node scripts/smoke-worker-browser.mjs"
   },
   "keywords": [
     "machine-learning",
@@ -98,5 +112,7 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "sideEffects": false
+  "sideEffects": [
+    "./dist/adapters/onnx-worker-entry.js"
+  ]
 }

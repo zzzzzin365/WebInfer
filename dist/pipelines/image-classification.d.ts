@@ -19,6 +19,7 @@ export declare class ImageClassificationPipeline extends BasePipeline<ImageInput
     private modelUrl;
     constructor(config: PipelineConfig, labels?: string[], _numClasses?: number);
     initialize(): Promise<void>;
+    dispose(): void;
     setLabels(labels: string[]): void;
     run(input: ImageInput | ImageInput[], options?: ImageClassificationOptions): Promise<ImageClassificationResult | ImageClassificationResult[]>;
     protected preprocess(input: ImageInput | ImageInput[]): Promise<WebInferTensor[]>;

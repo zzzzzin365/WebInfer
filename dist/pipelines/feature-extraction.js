@@ -6,7 +6,6 @@
 import { WebInferTensor } from '../core/tensor.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInferenceNamed } from '../core/runtime.js';
 import { BasePipeline, registerPipeline, } from './base.js';
 // ============================================================================
 // Default Model (all-MiniLM-L6-v2, 384-dim sentence embeddings)
@@ -29,14 +28,19 @@ export class FeatureExtractionPipeline extends BasePipeline {
         this.tokenizerUrl = DEFAULT_MODELS.tokenizer;
     }
     async initialize() {
-        await super.initialize();
         if (!this.tokenizer) {
             this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
         }
         if (!this.onnxModel) {
             const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-            this.onnxModel = await loadModelFromBuffer(modelData);
+            this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
         }
+        this.isReady = true;
+    }
+    dispose() {
+        this.onnxModel?.dispose();
+        this.onnxModel = null;
+        super.dispose();
     }
     async run(input, options) {
         const isBatch = Array.isArray(input);
@@ -46,9 +50,15 @@ export class FeatureExtractionPipeline extends BasePipeline {
         const results = [];
         for (const text of inputs) {
             const tensorInputs = await this.preprocess(text);
-            const outputs = await this.runInference(tensorInputs);
-            const result = await this.postprocess(outputs, options);
-            results.push(result);
+            let outputs = [];
+            try {
+                outputs = await this.runInference(tensorInputs, options);
+                results.push(await this.postprocess(outputs, options));
+            }
+            finally {
+                tensorInputs.forEach(t => t.dispose());
+                outputs.forEach(t => t.dispose());
+            }
         }
         const processingTime = performance.now() - startTime;
         for (const result of results) {
@@ -68,12 +78,12 @@ export class FeatureExtractionPipeline extends BasePipeline {
         const tokenTypeIds = new WebInferTensor(BigInt64Array.from(encoded.inputIds.map(() => BigInt(0))), [1, encoded.inputIds.length], 'int64');
         return [inputIds, attentionMask, tokenTypeIds];
     }
-    async runInference(inputs) {
+    async runInference(inputs, options) {
         const namedInputs = new Map();
         namedInputs.set('input_ids', inputs[0]);
         namedInputs.set('attention_mask', inputs[1]);
         namedInputs.set('token_type_ids', inputs[2]);
-        const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
+        const outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
         return outputs;
     }
     async postprocess(outputs, options) {

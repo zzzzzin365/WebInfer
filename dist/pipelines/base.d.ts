@@ -1,3 +1,4 @@
+import type { InferenceClient } from '../core/inference-client.js';
 /**
  * WebInfer - Base Pipeline
  *
@@ -51,6 +52,7 @@ export interface ObjectDetectionResult extends PipelineResult {
  * BasePipeline - Abstract base class for all pipelines
  */
 export declare abstract class BasePipeline<TInput, TOutput extends PipelineResult | PipelineResult[]> {
+    protected readonly inference: InferenceClient;
     protected model: LoadedModel | null;
     protected readonly config: PipelineConfig;
     protected readonly modelCache: ModelCache;

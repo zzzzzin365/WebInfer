@@ -1,0 +1,1 @@
+{"version":3,"file":"onnx-worker-handler.d.ts","sourceRoot":"","sources":["../../src/adapters/onnx-worker-handler.ts"],"names":[],"mappings":"AAGA,OAAO,KAAK,EAAE,oBAAoB,EAAE,qBAAqB,EAAE,MAAM,qBAAqB,CAAC;AAEvF,sFAAsF;AACtF,wBAAgB,uBAAuB,CAAC,IAAI,EAAE,CAAC,QAAQ,EAAE,qBAAqB,EAAE,SAAS,CAAC,EAAE,WAAW,EAAE,KAAK,IAAI,IAIxG,SAAS,oBAAoB,KAAG,OAAO,CAAC,IAAI,CAAC,CAsCtD"}

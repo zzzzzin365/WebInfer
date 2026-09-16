@@ -19,6 +19,7 @@ export declare class FeatureExtractionPipeline extends BasePipeline<string | str
     private tokenizerUrl;
     constructor(config: PipelineConfig, embeddingDim?: number);
     initialize(): Promise<void>;
+    dispose(): void;
     run(input: string | string[], options?: FeatureExtractionOptions): Promise<FeatureExtractionResult | FeatureExtractionResult[]>;
     protected preprocess(input: string | string[]): Promise<WebInferTensor[]>;
     private runInference;

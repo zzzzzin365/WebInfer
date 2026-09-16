@@ -11,7 +11,7 @@ export { WASMRuntime, createWASMRuntime } from './wasm.js';
 export { ONNXRuntime, createONNXRuntime, isOnnxAvailable } from './onnx.js';
 // transformers.js Adapter Backend
 export { TransformersAdapterRuntime, useTransformersBackend, getTransformersAdapter, } from './transformers-adapter.js';
-import { registerRuntime } from '../core/runtime.js';
+import { getRuntimeManager } from '../core/runtime.js';
 import { createONNXRuntime } from './onnx.js';
 /**
  * Register all available backends.
@@ -22,11 +22,8 @@ import { createONNXRuntime } from './onnx.js';
  * selects a backend, so if onnxruntime-web is not installed the runtime is
  * simply skipped at that point.
  */
-export function registerAllBackends() {
-    registerRuntime('wasm', createONNXRuntime);
+export function registerAllBackends(manager = getRuntimeManager()) {
+    if (!manager.has('wasm'))
+        manager.register('wasm', createONNXRuntime);
 }
-/**
- * Auto-register backends on module load (synchronous — no race condition).
- */
-registerAllBackends();
 //# sourceMappingURL=index.js.map

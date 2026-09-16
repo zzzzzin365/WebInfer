@@ -8,7 +8,6 @@ import { WebInferTensor } from '../core/tensor.js';
 import { AudioPreprocessor } from '../utils/preprocessor.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInference, runInferenceNamed } from '../core/runtime.js';
 // ============================================================================
 // Default Model (Whisper-tiny, quantized encoder + decoder)
 // ============================================================================
@@ -59,11 +58,11 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline {
         }
         if (!this.encoderModel) {
             const data = await loadModelData(this.encoderUrl, { cache: this.config.cache ?? true });
-            this.encoderModel = await loadModelFromBuffer(data);
+            this.encoderModel = await this.inference.loadModelFromBuffer(data);
         }
         if (!this.decoderModel) {
             const data = await loadModelData(this.decoderUrl, { cache: this.config.cache ?? true });
-            this.decoderModel = await loadModelFromBuffer(data);
+            this.decoderModel = await this.inference.loadModelFromBuffer(data);
         }
     }
     setTokenizer(tokenizer) {
@@ -87,12 +86,12 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline {
         const melTensor = await this.audioPreprocessor.process(audio);
         const melInput = new WebInferTensor(melTensor.toFloat32Array(), [1, ...melTensor.shape], 'float32');
         // 2. Run encoder
-        const encoderOutputs = await runInference(this.encoderModel, [melInput]);
+        const encoderOutputs = await this.inference.runInference(this.encoderModel, [melInput], options);
         const encoderHidden = encoderOutputs[0];
         // 3. Autoregressive decoder loop
         const task = options.task ?? 'transcribe';
         const initialTokens = this.buildInitialTokens(task, options.language);
-        const generatedTokens = await this.autoregressiveDecode(encoderHidden, initialTokens);
+        const generatedTokens = await this.autoregressiveDecode(encoderHidden, initialTokens, options);
         // 4. Decode tokens to text
         const text = this.tokenizer.decode(generatedTokens, true);
         const result = {
@@ -125,14 +124,14 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline {
      * Autoregressive decoder loop similar to text-generation.
      * Feeds encoder hidden states + growing token sequence to decoder.
      */
-    async autoregressiveDecode(encoderHidden, initialTokens) {
+    async autoregressiveDecode(encoderHidden, initialTokens, options) {
         const tokens = [...initialTokens];
         for (let step = 0; step < MAX_DECODER_TOKENS; step++) {
             const decoderInputIds = new WebInferTensor(BigInt64Array.from(tokens.map(t => BigInt(t))), [1, tokens.length], 'int64');
             const namedInputs = new Map();
             namedInputs.set('input_ids', decoderInputIds);
             namedInputs.set('encoder_hidden_states', encoderHidden);
-            const decoderOutputs = await runInferenceNamed(this.decoderModel, namedInputs);
+            const decoderOutputs = await this.inference.runInferenceNamed(this.decoderModel, namedInputs, options);
             const logits = decoderOutputs[0].toFloat32Array();
             // Get logits for the last token position
             const vocabSize = logits.length / tokens.length;

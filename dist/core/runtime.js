@@ -11,14 +11,6 @@ import { getMemoryManager } from './memory.js';
 // Runtime Registry
 // ============================================================================
 /**
- * Registered runtime factories
- */
-const runtimeFactories = new Map();
-/**
- * Cached runtime instances
- */
-const runtimeInstances = new Map();
-/**
  * Runtime priority order (higher priority first)
  */
 const RUNTIME_PRIORITY = ['webgpu', 'webnn', 'wasm'];
@@ -38,7 +30,11 @@ export class RuntimeManager {
     static instance = null;
     listeners = new Map();
     defaultRuntime = 'auto';
+    runtimeFactories = new Map();
+    runtimeInstances = new Map();
+    initializing = new Map();
     constructor() { }
+    has(type) { return this.runtimeFactories.has(type); }
     /**
      * Get singleton instance
      */
@@ -52,7 +48,10 @@ export class RuntimeManager {
      * Register a runtime factory
      */
     register(type, factory) {
-        runtimeFactories.set(type, factory);
+        if (this.runtimeInstances.has(type) || this.initializing.has(type)) {
+            throw new Error(`Runtime '${type}' is already active`);
+        }
+        this.runtimeFactories.set(type, factory);
     }
     /**
      * Get a runtime instance
@@ -61,32 +60,37 @@ export class RuntimeManager {
         if (type === 'auto') {
             return this.getBestRuntime();
         }
-        // Check if already instantiated
-        let runtime = runtimeInstances.get(type);
-        if (runtime) {
-            return runtime;
-        }
-        // Create new instance
-        const factory = runtimeFactories.get(type);
-        if (!factory) {
-            throw new WebInferError(`Runtime '${type}' is not registered`, ErrorCodes.RUNTIME_NOT_AVAILABLE, { runtime: type });
-        }
-        runtime = factory();
-        // Check availability
-        const available = await runtime.isAvailable();
-        if (!available) {
-            throw new WebInferError(`Runtime '${type}' is not available in this environment`, ErrorCodes.RUNTIME_NOT_AVAILABLE, { runtime: type });
-        }
-        // Initialize
+        const existing = this.runtimeInstances.get(type);
+        if (existing)
+            return existing;
+        const pending = this.initializing.get(type);
+        if (pending)
+            return pending;
+        const factory = this.runtimeFactories.get(type);
+        if (!factory)
+            throw new WebInferError(`Runtime '${type}' is not registered`, ErrorCodes.RUNTIME_NOT_AVAILABLE);
+        const promise = (async () => {
+            const runtime = factory();
+            try {
+                if (!await runtime.isAvailable())
+                    throw new Error(`Runtime '${type}' is not available`);
+                await runtime.initialize();
+                this.runtimeInstances.set(type, runtime);
+                this.emit('runtime:ready', { runtime: type });
+                return runtime;
+            }
+            catch (error) {
+                await runtime.dispose();
+                throw error;
+            }
+        })();
+        this.initializing.set(type, promise);
         try {
-            await runtime.initialize();
+            return await promise;
         }
-        catch (error) {
-            throw new WebInferError(`Failed to initialize runtime '${type}': ${error instanceof Error ? error.message : String(error)}`, ErrorCodes.RUNTIME_INIT_FAILED, { runtime: type, error });
+        finally {
+            this.initializing.delete(type);
         }
-        runtimeInstances.set(type, runtime);
-        this.emit('runtime:ready', { runtime: type });
-        return runtime;
     }
     /**
      * Get the best available runtime
@@ -94,23 +98,8 @@ export class RuntimeManager {
     async getBestRuntime() {
         for (const type of RUNTIME_PRIORITY) {
             try {
-                // Check if already available
-                const existing = runtimeInstances.get(type);
-                if (existing) {
-                    return existing;
-                }
-                // Try to create and initialize
-                const factory = runtimeFactories.get(type);
-                if (!factory)
-                    continue;
-                const runtime = factory();
-                const available = await runtime.isAvailable();
-                if (available) {
-                    await runtime.initialize();
-                    runtimeInstances.set(type, runtime);
-                    this.emit('runtime:ready', { runtime: type });
-                    return runtime;
-                }
+                if (this.has(type))
+                    return await this.getRuntime(type);
             }
             catch {
                 // Try next runtime
@@ -125,14 +114,21 @@ export class RuntimeManager {
     async detectAvailableRuntimes() {
         const results = new Map();
         for (const type of RUNTIME_PRIORITY) {
-            const factory = runtimeFactories.get(type);
+            const factory = this.runtimeFactories.get(type);
             if (!factory) {
                 results.set(type, false);
                 continue;
             }
             try {
-                const runtime = factory();
-                results.set(type, await runtime.isAvailable());
+                const existing = this.runtimeInstances.get(type);
+                const runtime = existing ?? factory();
+                try {
+                    results.set(type, await runtime.isAvailable());
+                }
+                finally {
+                    if (!existing)
+                        await runtime.dispose();
+                }
             }
             catch {
                 results.set(type, false);
@@ -162,21 +158,20 @@ export class RuntimeManager {
     /**
      * Dispose a specific runtime
      */
-    disposeRuntime(type) {
-        const runtime = runtimeInstances.get(type);
+    async disposeRuntime(type) {
+        await this.initializing.get(type)?.catch(() => undefined);
+        const runtime = this.runtimeInstances.get(type);
         if (runtime) {
-            runtime.dispose();
-            runtimeInstances.delete(type);
+            await runtime.dispose();
+            this.runtimeInstances.delete(type);
         }
     }
     /**
      * Dispose all runtimes
      */
-    disposeAll() {
-        for (const [type, runtime] of runtimeInstances) {
-            runtime.dispose();
-            runtimeInstances.delete(type);
-        }
+    async disposeAll() {
+        await Promise.allSettled(this.initializing.values());
+        await Promise.all([...this.runtimeInstances.keys()].map(type => this.disposeRuntime(type)));
     }
     /**
      * Add event listener
@@ -237,12 +232,14 @@ function generateModelId() {
  * LoadedModelImpl - Implementation of LoadedModel interface
  */
 export class LoadedModelImpl {
+    memory;
     id;
     metadata;
     runtime;
     _isLoaded = true;
     _dispose;
-    constructor(metadata, runtime, dispose) {
+    constructor(metadata, runtime, dispose, memory = getMemoryManager()) {
+        this.memory = memory;
         this.id = generateModelId();
         this.metadata = metadata;
         this.runtime = runtime;
@@ -255,7 +252,7 @@ export class LoadedModelImpl {
         if (this._isLoaded) {
             this._isLoaded = false;
             this._dispose();
-            getMemoryManager().untrack(this.id);
+            this.memory.untrack(this.id);
         }
     }
 }
@@ -299,7 +296,7 @@ export async function loadModelFromBuffer(data, options = {}) {
 /**
  * Run inference on a model
  */
-export async function runInference(model, inputs) {
+export async function runInference(model, inputs, context = {}) {
     if (!model.isLoaded) {
         throw new WebInferError('Model has been disposed', ErrorCodes.MODEL_NOT_LOADED, { modelId: model.id });
     }
@@ -307,13 +304,12 @@ export async function runInference(model, inputs) {
     const runtime = await manager.getRuntime(model.runtime);
     // Use scheduler for execution
     const scheduler = getScheduler();
-    const task = scheduler.schedule(model.id, () => runtime.run(model, inputs));
-    return task.wait();
+    return scheduler.execute(model.id, () => runtime.run(model, inputs), context, outputs => outputs.forEach(t => t.dispose()));
 }
 /**
  * Run inference with named inputs
  */
-export async function runInferenceNamed(model, namedInputs) {
+export async function runInferenceNamed(model, namedInputs, context = {}) {
     if (!model.isLoaded) {
         throw new WebInferError('Model has been disposed', ErrorCodes.MODEL_NOT_LOADED, { modelId: model.id });
     }
@@ -325,20 +321,13 @@ export async function runInferenceNamed(model, namedInputs) {
     }
     // Use scheduler for execution
     const scheduler = getScheduler();
-    const task = scheduler.schedule(model.id, () => runtime.runNamed(model, namedInputs));
-    return task.wait();
+    return scheduler.execute(model.id, () => runtime.runNamed(model, namedInputs), context, outputs => outputs.forEach(t => t.dispose()));
 }
 /**
  * Run inference with batch processing
  */
-export async function runBatchInference(model, batches) {
-    const scheduler = getScheduler();
-    const manager = RuntimeManager.getInstance();
-    const runtime = await manager.getRuntime(model.runtime);
-    // Schedule all batches
-    const tasks = batches.map(inputs => scheduler.schedule(model.id, () => runtime.run(model, inputs)));
-    // Wait for all to complete
-    return Promise.all(tasks.map(task => task.wait()));
+export async function runBatchInference(model, batches, context = {}) {
+    return Promise.all(batches.map(inputs => runInference(model, inputs, context)));
 }
 // ============================================================================
 // Convenience Functions

@@ -20,6 +20,7 @@ export declare class TextClassificationPipeline extends BasePipeline<string | st
     private tokenizerUrl;
     constructor(config: PipelineConfig, labels?: string[]);
     initialize(): Promise<void>;
+    dispose(): void;
     setLabels(labels: string[]): void;
     run(input: string | string[], options?: TextClassificationOptions): Promise<TextClassificationResult | TextClassificationResult[]>;
     protected preprocess(input: string | string[]): Promise<WebInferTensor[]>;

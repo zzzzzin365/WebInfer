@@ -169,7 +169,7 @@ export {
   type CompositionStage,
   type CompositionResult,
   type ComposedPipeline,
-} from './core/composer.js';
+} from './pipelines/composer.js';
 
 // Runtime management
 export {
@@ -520,3 +520,7 @@ export async function getInfo(): Promise<{
 import { RuntimeType } from './core/types.js';
 import { getAvailableRuntimes } from './core/runtime.js';
 import { ModelDownloadCache } from './utils/cache.js';
+
+export { InferenceEngine, createInferenceEngine, type EngineOptions } from './core/engine.js';
+export type { InferenceClient, ExecutionContext, LoadOptions } from './core/inference-client.js';
+export { TaskScope } from './core/task-scope.js';

@@ -1,3 +1,4 @@
+import type { ExecutionContext } from './inference-client.js';
 /**
  * WebInfer - Runtime Management
  *
@@ -5,6 +6,7 @@
  * Provides unified interface for different compute backends.
  */
 import { Runtime, RuntimeType, RuntimeCapabilities, LoadedModel, ModelLoadOptions, ModelMetadata, Tensor, EventType, EventListener } from './types.js';
+import { MemoryManager } from './memory.js';
 /**
  * RuntimeManager - Manages runtime selection and lifecycle
  *
@@ -18,7 +20,11 @@ export declare class RuntimeManager {
     private static instance;
     private readonly listeners;
     private defaultRuntime;
-    private constructor();
+    private readonly runtimeFactories;
+    private readonly runtimeInstances;
+    private readonly initializing;
+    constructor();
+    has(type: RuntimeType): boolean;
     /**
      * Get singleton instance
      */
@@ -54,11 +60,11 @@ export declare class RuntimeManager {
     /**
      * Dispose a specific runtime
      */
-    disposeRuntime(type: RuntimeType): void;
+    disposeRuntime(type: RuntimeType): Promise<void>;
     /**
      * Dispose all runtimes
      */
-    disposeAll(): void;
+    disposeAll(): Promise<void>;
     /**
      * Add event listener
      */
@@ -76,12 +82,13 @@ export declare class RuntimeManager {
  * LoadedModelImpl - Implementation of LoadedModel interface
  */
 export declare class LoadedModelImpl implements LoadedModel {
+    private readonly memory;
     readonly id: string;
     readonly metadata: ModelMetadata;
     readonly runtime: RuntimeType;
     private _isLoaded;
     private readonly _dispose;
-    constructor(metadata: ModelMetadata, runtime: RuntimeType, dispose: () => void);
+    constructor(metadata: ModelMetadata, runtime: RuntimeType, dispose: () => void, memory?: MemoryManager);
     get isLoaded(): boolean;
     dispose(): void;
 }
@@ -105,15 +112,15 @@ export declare function loadModelFromBuffer(data: ArrayBuffer, options?: ModelLo
 /**
  * Run inference on a model
  */
-export declare function runInference(model: LoadedModel, inputs: Tensor[]): Promise<Tensor[]>;
+export declare function runInference(model: LoadedModel, inputs: Tensor[], context?: ExecutionContext): Promise<Tensor[]>;
 /**
  * Run inference with named inputs
  */
-export declare function runInferenceNamed(model: LoadedModel, namedInputs: Map<string, Tensor>): Promise<Tensor[]>;
+export declare function runInferenceNamed(model: LoadedModel, namedInputs: Map<string, Tensor>, context?: ExecutionContext): Promise<Tensor[]>;
 /**
  * Run inference with batch processing
  */
-export declare function runBatchInference(model: LoadedModel, batches: Tensor[][]): Promise<Tensor[][]>;
+export declare function runBatchInference(model: LoadedModel, batches: Tensor[][], context?: ExecutionContext): Promise<Tensor[][]>;
 /**
  * Get runtime manager instance
  */

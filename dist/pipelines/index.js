@@ -1,6 +1,3 @@
-/**
- * WebInfer - Pipeline Exports
- */
 import { getPluginPipeline } from '../core/plugin.js';
 import { registerAllBackends } from '../backends/index.js';
 // Base
@@ -51,9 +48,11 @@ import { ImageSegmentationPipeline } from './image-segmentation.js';
 export async function pipeline(task, options) {
     // Guarantee backends are registered before any model loads.
     // registerAllBackends() is synchronous and idempotent (safe to call repeatedly).
-    registerAllBackends();
+    if (!options?.engine)
+        registerAllBackends();
     const config = {
         task: task,
+        engine: options?.engine,
         model: options?.model ?? 'default',
         runtime: options?.runtime,
         cache: options?.cache ?? true,
@@ -118,4 +117,5 @@ export async function createPipelines(tasks, options) {
     }
     return result;
 }
+export { compose, parallel } from './composer.js';
 //# sourceMappingURL=index.js.map

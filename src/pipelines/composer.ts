@@ -19,8 +19,8 @@
  * ```
  */
 
-import { pipeline, type PipelineFactoryOptions } from '../pipelines/index.js';
-import type { PipelineTask } from './types.js';
+import { pipeline, type PipelineFactoryOptions } from './index.js';
+import type { PipelineTask } from '../core/types.js';
 
 // ---------------------------------------------------------------------------
 // Types

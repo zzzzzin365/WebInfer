@@ -8,6 +8,8 @@ export { MemoryManager, MemoryScope, ModelCache, withMemoryScope, withMemoryScop
 export { RuntimeManager, LoadedModelImpl, loadModel, loadModelFromBuffer, runInference, runBatchInference, getRuntimeManager, registerRuntime, getBestRuntime, getAvailableRuntimes, } from './runtime.js';
 export { registerPlugin, getPluginPipeline, getPluginMiddleware, listPlugins, unregisterPlugin, type WebInferPlugin, type PluginPipelineEntry, type PluginBackendEntry, type PluginMiddleware, } from './plugin.js';
 export { getDeviceProfile, recommendQuantization, recommendModelVariant, resetDeviceProfile, type DeviceProfile, type DeviceTier, type ModelRecommendation, } from './device-profiler.js';
-export { compose, parallel, type CompositionStage, type CompositionResult, type ComposedPipeline, } from './composer.js';
 export { InferenceWorker, WorkerPool, getWorkerPool, runInWorker, isWorkerSupported, serializeTensor, deserializeTensor, type WorkerMessage, type WorkerMessageType, type LoadModelRequest, type InferenceRequest, type SerializedTensor, type WorkerPoolOptions, } from './worker.js';
+export { InferenceEngine, createInferenceEngine, type EngineOptions } from './engine.js';
+export type { InferenceClient, ExecutionContext, LoadOptions } from './inference-client.js';
+export { TaskScope } from './task-scope.js';
 //# sourceMappingURL=index.d.ts.map

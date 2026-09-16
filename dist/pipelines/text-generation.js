@@ -8,7 +8,6 @@
 import { BasePipeline } from './base.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { WebInferTensor, softmax } from '../core/tensor.js';
-import { runInferenceNamed, loadModelFromBuffer } from '../core/runtime.js';
 // ============================================================================
 // Default Model URLs (TinyLlama - quantized for browser)
 // ============================================================================
@@ -97,7 +96,7 @@ export class TextGenerationPipeline extends BasePipeline {
                 progress: Math.round((loaded / total) * 100),
             });
         });
-        this.llmModel = await loadModelFromBuffer(modelData, {
+        this.llmModel = await this.inference.loadModelFromBuffer(modelData, {
             runtime: 'wasm', // Uses ONNXRuntime which auto-detects WebGPU internally
         });
         this.model = this.llmModel;
@@ -217,7 +216,7 @@ export class TextGenerationPipeline extends BasePipeline {
             if (inputIds.length >= maxLength)
                 break;
             // Run model forward pass
-            const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample);
+            const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample, options);
             // Check for EOS
             if (nextTokenId === this.eosTokenId) {
                 yield {
@@ -282,7 +281,7 @@ export class TextGenerationPipeline extends BasePipeline {
             if (inputIds.length >= maxLength)
                 break;
             // Run model forward pass
-            const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample);
+            const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample, options);
             // Check for EOS
             if (nextTokenId === this.eosTokenId)
                 break;
@@ -320,7 +319,7 @@ export class TextGenerationPipeline extends BasePipeline {
     /**
      * Generate next token using the model
      */
-    async generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample) {
+    async generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample, options) {
         if (!this.model) {
             throw new Error('Model not loaded');
         }
@@ -345,7 +344,7 @@ export class TextGenerationPipeline extends BasePipeline {
             inputs.set(`past_key_values.${i}.value`, new WebInferTensor(new Float32Array(0), [1, numKVHeads, 0, headDim], 'float32'));
         }
         // Run inference with named inputs
-        const outputs = await runInferenceNamed(this.model, inputs);
+        const outputs = await this.inference.runInferenceNamed(this.model, inputs, options);
         if (!outputs || outputs.length === 0) {
             throw new Error('Model returned no outputs');
         }

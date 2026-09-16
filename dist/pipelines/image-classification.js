@@ -6,7 +6,6 @@
 import { softmax } from '../core/tensor.js';
 import { createImagePreprocessor } from '../utils/preprocessor.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInference } from '../core/runtime.js';
 import { BasePipeline, registerPipeline, IMAGENET_LABELS, } from './base.js';
 // ============================================================================
 // Default Model (MobileViT-small, quantized)
@@ -25,14 +24,19 @@ export class ImageClassificationPipeline extends BasePipeline {
         this.modelUrl = config.model !== 'default' ? config.model : DEFAULT_MODELS.model;
     }
     async initialize() {
-        await super.initialize();
         if (!this.preprocessor) {
             this.preprocessor = createImagePreprocessor('imagenet');
         }
         if (!this.onnxModel) {
             const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-            this.onnxModel = await loadModelFromBuffer(modelData);
+            this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
         }
+        this.isReady = true;
+    }
+    dispose() {
+        this.onnxModel?.dispose();
+        this.onnxModel = null;
+        super.dispose();
     }
     setLabels(labels) {
         this.labels = labels;
@@ -45,9 +49,15 @@ export class ImageClassificationPipeline extends BasePipeline {
         const results = [];
         for (const image of inputs) {
             const tensorInputs = await this.preprocess(image);
-            const outputs = await this.runModelInference(tensorInputs);
-            const result = await this.postprocess(outputs, options);
-            results.push(result);
+            let outputs = [];
+            try {
+                outputs = await this.runModelInference(tensorInputs, options);
+                results.push(await this.postprocess(outputs, options));
+            }
+            finally {
+                tensorInputs.forEach(t => t.dispose());
+                outputs.forEach(t => t.dispose());
+            }
         }
         const processingTime = performance.now() - startTime;
         for (const result of results) {
@@ -63,8 +73,8 @@ export class ImageClassificationPipeline extends BasePipeline {
         }
         return [tensor];
     }
-    async runModelInference(inputs) {
-        const outputs = await runInference(this.onnxModel, inputs);
+    async runModelInference(inputs, options) {
+        const outputs = await this.inference.runInference(this.onnxModel, inputs, options);
         return outputs;
     }
     async postprocess(outputs, options) {
@@ -74,6 +84,7 @@ export class ImageClassificationPipeline extends BasePipeline {
         }
         const probs = softmax(logits, -1);
         const probsArray = probs.toFloat32Array();
+        probs.dispose();
         let maxIdx = 0;
         let maxScore = probsArray[0] ?? 0;
         for (let i = 1; i < probsArray.length; i++) {

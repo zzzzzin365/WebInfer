@@ -8,7 +8,6 @@ import { BasePipeline, registerPipeline } from './base.js';
 import { WebInferTensor, softmax } from '../core/tensor.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInferenceNamed } from '../core/runtime.js';
 // ============================================================================
 // Default Model (DistilBART fine-tuned on MNLI)
 // ============================================================================
@@ -36,14 +35,14 @@ export class ZeroShotClassificationPipeline extends BasePipeline {
         this.tokenizerUrl = DEFAULT_MODELS.tokenizer;
     }
     async initialize() {
-        await super.initialize();
         if (!this.tokenizer) {
             this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
         }
         if (!this.onnxModel) {
             const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-            this.onnxModel = await loadModelFromBuffer(modelData);
+            this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
         }
+        this.isReady = true;
     }
     setTokenizer(tokenizer) {
         this.tokenizer = tokenizer;
@@ -58,15 +57,15 @@ export class ZeroShotClassificationPipeline extends BasePipeline {
         const texts = Array.isArray(text) ? text : [text];
         const template = opts.hypothesisTemplate ?? this.hypothesisTemplate;
         const multiLabel = opts.multiLabel ?? false;
-        const results = await Promise.all(texts.map(t => this.classifySingle(t, candidateLabels, template, multiLabel)));
+        const results = await Promise.all(texts.map(t => this.classifySingle(t, candidateLabels, template, multiLabel, options)));
         return Array.isArray(text) ? results : results[0];
     }
-    async classifySingle(text, candidateLabels, template, multiLabel) {
+    async classifySingle(text, candidateLabels, template, multiLabel, options) {
         const startTime = performance.now();
         const hypotheses = candidateLabels.map(label => template.replace('{label}', label));
         const scores = [];
         for (const hypothesis of hypotheses) {
-            const score = await this.scoreHypothesis(text, hypothesis);
+            const score = await this.scoreHypothesis(text, hypothesis, options);
             scores.push(score);
         }
         let normalizedScores;
@@ -75,7 +74,10 @@ export class ZeroShotClassificationPipeline extends BasePipeline {
         }
         else {
             const tensor = new WebInferTensor(new Float32Array(scores), [scores.length], 'float32');
-            normalizedScores = Array.from(softmax(tensor).toFloat32Array());
+            const probs = softmax(tensor);
+            normalizedScores = Array.from(probs.toFloat32Array());
+            probs.dispose();
+            tensor.dispose();
         }
         const indexed = candidateLabels.map((label, i) => ({
             label,
@@ -93,7 +95,7 @@ export class ZeroShotClassificationPipeline extends BasePipeline {
      * Score a single hypothesis using the real NLI ONNX model.
      * Returns the entailment logit.
      */
-    async scoreHypothesis(premise, hypothesis) {
+    async scoreHypothesis(premise, hypothesis, options) {
         const encoded = this.tokenizer.encode(premise, {
             textPair: hypothesis,
             addSpecialTokens: true,
@@ -106,10 +108,21 @@ export class ZeroShotClassificationPipeline extends BasePipeline {
         const namedInputs = new Map();
         namedInputs.set('input_ids', inputIds);
         namedInputs.set('attention_mask', attentionMask);
-        const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
-        const logits = outputs[0].toFloat32Array();
-        // Return entailment logit (index 2 in [contradiction, neutral, entailment])
-        return logits[ENTAILMENT_IDX] ?? 0;
+        let outputs = [];
+        try {
+            outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
+            return outputs[0].toFloat32Array()[ENTAILMENT_IDX] ?? 0;
+        }
+        finally {
+            inputIds.dispose();
+            attentionMask.dispose();
+            outputs.forEach(t => t.dispose());
+        }
+    }
+    dispose() {
+        this.onnxModel?.dispose();
+        this.onnxModel = null;
+        super.dispose();
     }
     async preprocess(input) {
         const { text, candidateLabels } = input;

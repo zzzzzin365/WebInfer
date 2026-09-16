@@ -10,7 +10,6 @@ import { WebInferTensor, softmax } from '../core/tensor.js';
 import { PipelineConfig, PipelineOptions, LoadedModel } from '../core/types.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInferenceNamed } from '../core/runtime.js';
 
 // ============================================================================
 // Default Model (DistilBART fine-tuned on MNLI)
@@ -68,16 +67,15 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
   }
 
   override async initialize(): Promise<void> {
-    await super.initialize();
-
     if (!this.tokenizer) {
       this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
     }
 
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
   }
 
   setTokenizer(tokenizer: Tokenizer): void {
@@ -105,7 +103,7 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
     const multiLabel = opts.multiLabel ?? false;
 
     const results = await Promise.all(
-      texts.map(t => this.classifySingle(t, candidateLabels, template, multiLabel))
+      texts.map(t => this.classifySingle(t, candidateLabels, template, multiLabel, options))
     );
 
     return Array.isArray(text) ? results : results[0]!;
@@ -115,7 +113,8 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
     text: string,
     candidateLabels: string[],
     template: string,
-    multiLabel: boolean
+    multiLabel: boolean,
+    options?: PipelineOptions
   ): Promise<ZeroShotClassificationResult> {
     const startTime = performance.now();
 
@@ -126,7 +125,7 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
     const scores: number[] = [];
 
     for (const hypothesis of hypotheses) {
-      const score = await this.scoreHypothesis(text, hypothesis);
+      const score = await this.scoreHypothesis(text, hypothesis, options);
       scores.push(score);
     }
 
@@ -136,7 +135,9 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
       normalizedScores = scores.map(s => 1 / (1 + Math.exp(-s)));
     } else {
       const tensor = new WebInferTensor(new Float32Array(scores), [scores.length], 'float32');
-      normalizedScores = Array.from(softmax(tensor).toFloat32Array());
+      const probs = softmax(tensor);
+      normalizedScores = Array.from(probs.toFloat32Array());
+      probs.dispose(); tensor.dispose();
     }
 
     const indexed = candidateLabels.map((label, i) => ({
@@ -157,7 +158,7 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
    * Score a single hypothesis using the real NLI ONNX model.
    * Returns the entailment logit.
    */
-  private async scoreHypothesis(premise: string, hypothesis: string): Promise<number> {
+  private async scoreHypothesis(premise: string, hypothesis: string, options?: PipelineOptions): Promise<number> {
     const encoded = this.tokenizer!.encode(premise, {
       textPair: hypothesis,
       addSpecialTokens: true,
@@ -181,11 +182,19 @@ export class ZeroShotClassificationPipeline extends BasePipeline<
     namedInputs.set('input_ids', inputIds);
     namedInputs.set('attention_mask', attentionMask);
 
-    const outputs = await runInferenceNamed(this.onnxModel!, namedInputs);
-    const logits = (outputs[0] as WebInferTensor).toFloat32Array();
+    let outputs: import('../core/types.js').Tensor[] = [];
+    try {
+      outputs = await this.inference.runInferenceNamed(this.onnxModel!, namedInputs, options);
+      return (outputs[0] as WebInferTensor).toFloat32Array()[ENTAILMENT_IDX] ?? 0;
+    } finally {
+      inputIds.dispose(); attentionMask.dispose(); outputs.forEach(t => t.dispose());
+    }
+  }
 
-    // Return entailment logit (index 2 in [contradiction, neutral, entailment])
-    return logits[ENTAILMENT_IDX] ?? 0;
+  override dispose(): void {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
 
   protected async preprocess(

@@ -1,3 +1,5 @@
+> 3D 业务重构的当前接口、迁移方式与验证边界见 [3D 业务接入](./3d-workflows.md)。
+
 # Architecture Overview
 
 WebInfer is a **production orchestration layer** for browser ML inference. It does not compete with inference engines like ONNX Runtime or transformers.js; it wraps them and adds the features real applications need.

@@ -38,6 +38,7 @@ export declare class ZeroShotClassificationPipeline extends BasePipeline<ZeroSho
      * Returns the entailment logit.
      */
     private scoreHypothesis;
+    dispose(): void;
     protected preprocess(input: ZeroShotInput): Promise<WebInferTensor[]>;
     protected postprocess(_outputs: WebInferTensor[], _options?: PipelineOptions): Promise<ZeroShotClassificationResult | ZeroShotClassificationResult[]>;
 }

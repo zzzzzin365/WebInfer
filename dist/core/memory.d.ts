@@ -38,7 +38,7 @@ export declare class MemoryManager {
     private peak;
     private gcScheduled;
     private disposed;
-    private constructor();
+    constructor(config?: MemoryPoolConfig);
     /**
      * Get singleton instance
      */

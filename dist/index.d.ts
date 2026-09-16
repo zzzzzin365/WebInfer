@@ -40,7 +40,7 @@ export { InferenceScheduler, getScheduler, setScheduler, configureScheduler, } f
 export { MemoryManager, MemoryScope, ModelCache, withMemoryScope, withMemoryScopeSync, getMemoryManager, getMemoryStats, release, gc, } from './core/memory.js';
 export { registerPlugin, getPluginPipeline, getPluginMiddleware, listPlugins, unregisterPlugin, type WebInferPlugin, type PluginPipelineEntry, type PluginBackendEntry, type PluginMiddleware, } from './core/plugin.js';
 export { getDeviceProfile, recommendQuantization, recommendModelVariant, resetDeviceProfile, type DeviceProfile, type DeviceTier, type ModelRecommendation, } from './core/device-profiler.js';
-export { compose, parallel, type CompositionStage, type CompositionResult, type ComposedPipeline, } from './core/composer.js';
+export { compose, parallel, type CompositionStage, type CompositionResult, type ComposedPipeline, } from './pipelines/composer.js';
 export { RuntimeManager, LoadedModelImpl, loadModel, loadModelFromBuffer, runInference, runBatchInference, getRuntimeManager, registerRuntime, getBestRuntime, getAvailableRuntimes, } from './core/runtime.js';
 export { WebGPURuntime, createWebGPURuntime, WebNNRuntime, createWebNNRuntime, WASMRuntime, createWASMRuntime, registerAllBackends, TransformersAdapterRuntime, useTransformersBackend, getTransformersAdapter, type TransformersAdapterOptions, type TransformersPipelineFactory, } from './backends/index.js';
 export { pipeline, createPipelines, BasePipeline, registerPipeline, getPipelineFactory, SENTIMENT_LABELS, EMOTION_LABELS, IMAGENET_LABELS, type PipelineResult, type TextClassificationResult, type FeatureExtractionResult, type ImageClassificationResult, type ObjectDetectionResult, TextClassificationPipeline, SentimentAnalysisPipeline, FeatureExtractionPipeline, ImageClassificationPipeline, TextGenerationPipeline, ImageSegmentationPipeline, createTextClassificationPipeline, createSentimentAnalysisPipeline, createFeatureExtractionPipeline, createImageClassificationPipeline, createTextGenerationPipeline, createImageSegmentationPipeline, type PipelineFactoryOptions, type TextClassificationOptions, type FeatureExtractionOptions, type ImageClassificationOptions, type ImageInput, type TextGenerationOptions, type TextGenerationResult, type GenerationStreamEvent, type ChatMessage, type ChatOptions, type ChatTemplateType, type LLMLoadProgress, type ImageSegmentationOptions, type ImageSegmentationResult, type PointPrompt, type BoxPrompt, type ModelLoadProgress, } from './pipelines/index.js';
@@ -71,4 +71,7 @@ export declare function getInfo(): Promise<{
     features: string[];
 }>;
 import { RuntimeType } from './core/types.js';
+export { InferenceEngine, createInferenceEngine, type EngineOptions } from './core/engine.js';
+export type { InferenceClient, ExecutionContext, LoadOptions } from './core/inference-client.js';
+export { TaskScope } from './core/task-scope.js';
 //# sourceMappingURL=index.d.ts.map

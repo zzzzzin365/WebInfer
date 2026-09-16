@@ -26,7 +26,7 @@ export {
 // Re-export types
 export type { Runtime, RuntimeType, RuntimeCapabilities } from '../core/types.js';
 
-import { registerRuntime } from '../core/runtime.js';
+import { getRuntimeManager, RuntimeManager } from '../core/runtime.js';
 import { createONNXRuntime } from './onnx.js';
 
 /**
@@ -38,11 +38,6 @@ import { createONNXRuntime } from './onnx.js';
  * selects a backend, so if onnxruntime-web is not installed the runtime is
  * simply skipped at that point.
  */
-export function registerAllBackends(): void {
-  registerRuntime('wasm', createONNXRuntime);
+export function registerAllBackends(manager: RuntimeManager = getRuntimeManager()): void {
+  if (!manager.has('wasm')) manager.register('wasm', createONNXRuntime);
 }
-
-/**
- * Auto-register backends on module load (synchronous — no race condition).
- */
-registerAllBackends();

@@ -10,7 +10,6 @@ import { BasePipeline, PipelineResult } from './base.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { WebInferTensor, softmax } from '../core/tensor.js';
 import { PipelineConfig, PipelineOptions, LoadedModel } from '../core/types.js';
-import { runInferenceNamed, loadModelFromBuffer } from '../core/runtime.js';
 
 // ============================================================================
 // Default Model URLs (TinyLlama - quantized for browser)
@@ -229,7 +228,7 @@ export class TextGenerationPipeline extends BasePipeline<string | string[], Text
       }
     );
     
-    this.llmModel = await loadModelFromBuffer(modelData, {
+    this.llmModel = await this.inference.loadModelFromBuffer(modelData, {
       runtime: 'wasm', // Uses ONNXRuntime which auto-detects WebGPU internally
     });
     this.model = this.llmModel;
@@ -403,7 +402,8 @@ export class TextGenerationPipeline extends BasePipeline<string | string[], Text
         topK,
         topP,
         repetitionPenalty,
-        doSample
+        doSample,
+        options
       );
 
       // Check for EOS
@@ -500,7 +500,8 @@ export class TextGenerationPipeline extends BasePipeline<string | string[], Text
         topK,
         topP,
         repetitionPenalty,
-        doSample
+        doSample,
+        options
       );
 
       // Check for EOS
@@ -550,7 +551,8 @@ export class TextGenerationPipeline extends BasePipeline<string | string[], Text
     topK: number,
     topP: number,
     repetitionPenalty: number,
-    doSample: boolean
+    doSample: boolean,
+    options?: PipelineOptions
   ): Promise<number> {
     if (!this.model) {
       throw new Error('Model not loaded');
@@ -604,7 +606,7 @@ export class TextGenerationPipeline extends BasePipeline<string | string[], Text
     }
 
     // Run inference with named inputs
-    const outputs = await runInferenceNamed(this.model, inputs);
+    const outputs = await this.inference.runInferenceNamed(this.model, inputs, options);
     
     if (!outputs || outputs.length === 0) {
       throw new Error('Model returned no outputs');

@@ -91,15 +91,6 @@ export {
   type ModelRecommendation,
 } from './device-profiler.js';
 
-// Composer
-export {
-  compose,
-  parallel,
-  type CompositionStage,
-  type CompositionResult,
-  type ComposedPipeline,
-} from './composer.js';
-
 // Worker
 export {
   InferenceWorker,
@@ -116,3 +107,7 @@ export {
   type SerializedTensor,
   type WorkerPoolOptions,
 } from './worker.js';
+
+export { InferenceEngine, createInferenceEngine, type EngineOptions } from './engine.js';
+export type { InferenceClient, ExecutionContext, LoadOptions } from './inference-client.js';
+export { TaskScope } from './task-scope.js';

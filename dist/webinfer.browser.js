@@ -1354,6 +1354,12 @@ var init_model_loader = __esm({
 init_types();
 init_tensor();
 
+// dist/core/inference-client.js
+function throwIfAborted(signal) {
+  if (signal?.aborted)
+    throw new DOMException("Inference cancelled", "AbortError");
+}
+
 // dist/core/scheduler.js
 init_types();
 var Task = class {
@@ -1644,59 +1650,67 @@ var InferenceScheduler = class {
   /**
    * Process pending tasks
    */
-  async processQueue() {
-    if (this.isProcessing || this.disposed) {
+  processQueue() {
+    if (this.isProcessing || this.disposed)
       return;
-    }
     this.isProcessing = true;
     try {
-      const tasksToStart = [];
-      for (const [modelId, queue] of this.queues) {
-        while (!queue.isEmpty() && this.canStartTask(modelId)) {
-          const task = queue.dequeue();
-          if (task && task.status === "pending") {
-            tasksToStart.push(task);
-            const running = this.getRunningSet(modelId);
-            running.add(task.id);
-            this.globalRunningCount++;
-          }
+      while (this.globalRunningCount < this.options.maxConcurrentTasks) {
+        let next;
+        for (const [modelId, queue] of this.queues) {
+          while (queue.peek() && queue.peek().status !== "pending")
+            queue.dequeue();
+          const candidate = queue.peek();
+          if (!candidate || !this.canStartTask(modelId))
+            continue;
+          if (!next || PRIORITY_ORDER[candidate.priority] < PRIORITY_ORDER[next.priority] || candidate.priority === next.priority && candidate.createdAt < next.createdAt)
+            next = candidate;
         }
-      }
-      await Promise.all(tasksToStart.map(async (task) => {
+        if (!next)
+          break;
+        const task = next;
+        this.queues.get(task.modelId).dequeue();
+        this.getRunningSet(task.modelId).add(task.id);
+        this.globalRunningCount++;
         this.emit("inference:start", { taskId: task.id, modelId: task.modelId });
-        try {
-          await task.execute();
-          this.emit("inference:complete", {
+        void task.execute().then(() => {
+          this.emit(task.status === "failed" ? "inference:error" : "inference:complete", {
             taskId: task.id,
             modelId: task.modelId,
+            error: task.error,
             duration: (task.completedAt ?? 0) - (task.startedAt ?? 0)
           });
-        } catch (error) {
-          this.emit("inference:error", {
-            taskId: task.id,
-            modelId: task.modelId,
-            error
-          });
-        } finally {
-          const running = this.runningTasks.get(task.modelId);
-          if (running) {
-            running.delete(task.id);
-          }
+        }).finally(() => {
+          this.runningTasks.get(task.modelId)?.delete(task.id);
           this.globalRunningCount--;
-        }
-      }));
+          this.processQueue();
+        });
+      }
     } finally {
       this.isProcessing = false;
     }
-    let hasPending = false;
-    for (const queue of this.queues.values()) {
-      if (!queue.isEmpty()) {
-        hasPending = true;
-        break;
+  }
+  /** Cancellation never frees a running slot before the executor settles. */
+  async execute(modelId, executor, context = {}, discard) {
+    throwIfAborted(context.signal);
+    const task = this.schedule(modelId, async () => {
+      throwIfAborted(context.signal);
+      const result = await executor();
+      if (context.signal?.aborted) {
+        discard?.(result);
+        throwIfAborted(context.signal);
       }
-    }
-    if (hasPending) {
-      setTimeout(() => this.processQueue(), 0);
+      return result;
+    }, context.priority);
+    const cancel = () => this.cancelTask(task.id);
+    context.signal?.addEventListener("abort", cancel, { once: true });
+    if (context.signal?.aborted)
+      cancel();
+    try {
+      return await task.wait();
+    } finally {
+      context.signal?.removeEventListener("abort", cancel);
+      this.allTasks.delete(task.id);
     }
   }
   /**
@@ -1720,6 +1734,8 @@ var InferenceScheduler = class {
           return result;
         } catch (err) {
           lastError = err instanceof Error ? err : new Error(String(err));
+          if (err instanceof DOMException && err.name === "AbortError")
+            throw err;
           this.circuitFailure(modelId);
           if (attempt < maxRetries) {
             const delay = baseDelay * Math.pow(2, attempt);
@@ -2258,7 +2274,8 @@ var _MemoryManager = class _MemoryManager {
     this.disposeAll();
     this.disposed = true;
     this.listeners.clear();
-    _MemoryManager.instance = null;
+    if (_MemoryManager.instance === this)
+      _MemoryManager.instance = null;
   }
 };
 __publicField(_MemoryManager, "instance", null);
@@ -2300,7 +2317,7 @@ var MemoryScope = class _MemoryScope {
    * Dispose all resources in this scope
    */
   dispose() {
-    for (const child of this.children) {
+    for (const child of [...this.children]) {
       child.dispose();
     }
     this.children = [];
@@ -2443,14 +2460,32 @@ function gc() {
 }
 
 // dist/core/runtime.js
+var runtime_exports = {};
+__export(runtime_exports, {
+  LoadedModelImpl: () => LoadedModelImpl,
+  RuntimeManager: () => RuntimeManager,
+  getAvailableRuntimes: () => getAvailableRuntimes,
+  getBestRuntime: () => getBestRuntime,
+  getRuntimeManager: () => getRuntimeManager,
+  loadModel: () => loadModel,
+  loadModelFromBuffer: () => loadModelFromBuffer,
+  registerRuntime: () => registerRuntime,
+  runBatchInference: () => runBatchInference,
+  runInference: () => runInference,
+  runInferenceNamed: () => runInferenceNamed
+});
 init_types();
-var runtimeFactories = /* @__PURE__ */ new Map();
-var runtimeInstances = /* @__PURE__ */ new Map();
 var RUNTIME_PRIORITY = ["webgpu", "webnn", "wasm"];
 var _RuntimeManager = class _RuntimeManager {
   constructor() {
     __publicField(this, "listeners", /* @__PURE__ */ new Map());
     __publicField(this, "defaultRuntime", "auto");
+    __publicField(this, "runtimeFactories", /* @__PURE__ */ new Map());
+    __publicField(this, "runtimeInstances", /* @__PURE__ */ new Map());
+    __publicField(this, "initializing", /* @__PURE__ */ new Map());
+  }
+  has(type) {
+    return this.runtimeFactories.has(type);
   }
   /**
    * Get singleton instance
@@ -2465,7 +2500,10 @@ var _RuntimeManager = class _RuntimeManager {
    * Register a runtime factory
    */
   register(type, factory) {
-    runtimeFactories.set(type, factory);
+    if (this.runtimeInstances.has(type) || this.initializing.has(type)) {
+      throw new Error(`Runtime '${type}' is already active`);
+    }
+    this.runtimeFactories.set(type, factory);
   }
   /**
    * Get a runtime instance
@@ -2474,27 +2512,35 @@ var _RuntimeManager = class _RuntimeManager {
     if (type === "auto") {
       return this.getBestRuntime();
     }
-    let runtime = runtimeInstances.get(type);
-    if (runtime) {
-      return runtime;
-    }
-    const factory = runtimeFactories.get(type);
-    if (!factory) {
-      throw new WebInferError(`Runtime '${type}' is not registered`, ErrorCodes.RUNTIME_NOT_AVAILABLE, { runtime: type });
-    }
-    runtime = factory();
-    const available = await runtime.isAvailable();
-    if (!available) {
-      throw new WebInferError(`Runtime '${type}' is not available in this environment`, ErrorCodes.RUNTIME_NOT_AVAILABLE, { runtime: type });
-    }
+    const existing = this.runtimeInstances.get(type);
+    if (existing)
+      return existing;
+    const pending = this.initializing.get(type);
+    if (pending)
+      return pending;
+    const factory = this.runtimeFactories.get(type);
+    if (!factory)
+      throw new WebInferError(`Runtime '${type}' is not registered`, ErrorCodes.RUNTIME_NOT_AVAILABLE);
+    const promise = (async () => {
+      const runtime = factory();
+      try {
+        if (!await runtime.isAvailable())
+          throw new Error(`Runtime '${type}' is not available`);
+        await runtime.initialize();
+        this.runtimeInstances.set(type, runtime);
+        this.emit("runtime:ready", { runtime: type });
+        return runtime;
+      } catch (error) {
+        await runtime.dispose();
+        throw error;
+      }
+    })();
+    this.initializing.set(type, promise);
     try {
-      await runtime.initialize();
-    } catch (error) {
-      throw new WebInferError(`Failed to initialize runtime '${type}': ${error instanceof Error ? error.message : String(error)}`, ErrorCodes.RUNTIME_INIT_FAILED, { runtime: type, error });
+      return await promise;
+    } finally {
+      this.initializing.delete(type);
     }
-    runtimeInstances.set(type, runtime);
-    this.emit("runtime:ready", { runtime: type });
-    return runtime;
   }
   /**
    * Get the best available runtime
@@ -2502,21 +2548,8 @@ var _RuntimeManager = class _RuntimeManager {
   async getBestRuntime() {
     for (const type of RUNTIME_PRIORITY) {
       try {
-        const existing = runtimeInstances.get(type);
-        if (existing) {
-          return existing;
-        }
-        const factory = runtimeFactories.get(type);
-        if (!factory)
-          continue;
-        const runtime = factory();
-        const available = await runtime.isAvailable();
-        if (available) {
-          await runtime.initialize();
-          runtimeInstances.set(type, runtime);
-          this.emit("runtime:ready", { runtime: type });
-          return runtime;
-        }
+        if (this.has(type))
+          return await this.getRuntime(type);
       } catch {
         continue;
       }
@@ -2529,14 +2562,20 @@ var _RuntimeManager = class _RuntimeManager {
   async detectAvailableRuntimes() {
     const results = /* @__PURE__ */ new Map();
     for (const type of RUNTIME_PRIORITY) {
-      const factory = runtimeFactories.get(type);
+      const factory = this.runtimeFactories.get(type);
       if (!factory) {
         results.set(type, false);
         continue;
       }
       try {
-        const runtime = factory();
-        results.set(type, await runtime.isAvailable());
+        const existing = this.runtimeInstances.get(type);
+        const runtime = existing ?? factory();
+        try {
+          results.set(type, await runtime.isAvailable());
+        } finally {
+          if (!existing)
+            await runtime.dispose();
+        }
       } catch {
         results.set(type, false);
       }
@@ -2565,21 +2604,20 @@ var _RuntimeManager = class _RuntimeManager {
   /**
    * Dispose a specific runtime
    */
-  disposeRuntime(type) {
-    const runtime = runtimeInstances.get(type);
+  async disposeRuntime(type) {
+    await this.initializing.get(type)?.catch(() => void 0);
+    const runtime = this.runtimeInstances.get(type);
     if (runtime) {
-      runtime.dispose();
-      runtimeInstances.delete(type);
+      await runtime.dispose();
+      this.runtimeInstances.delete(type);
     }
   }
   /**
    * Dispose all runtimes
    */
-  disposeAll() {
-    for (const [type, runtime] of runtimeInstances) {
-      runtime.dispose();
-      runtimeInstances.delete(type);
-    }
+  async disposeAll() {
+    await Promise.allSettled(this.initializing.values());
+    await Promise.all([...this.runtimeInstances.keys()].map((type) => this.disposeRuntime(type)));
   }
   /**
    * Add event listener
@@ -2629,12 +2667,14 @@ function generateModelId() {
   return `model_${++modelIdCounter}_${Date.now().toString(36)}`;
 }
 var LoadedModelImpl = class {
-  constructor(metadata, runtime, dispose) {
+  constructor(metadata, runtime, dispose, memory = getMemoryManager()) {
+    __publicField(this, "memory");
     __publicField(this, "id");
     __publicField(this, "metadata");
     __publicField(this, "runtime");
     __publicField(this, "_isLoaded", true);
     __publicField(this, "_dispose");
+    this.memory = memory;
     this.id = generateModelId();
     this.metadata = metadata;
     this.runtime = runtime;
@@ -2647,7 +2687,7 @@ var LoadedModelImpl = class {
     if (this._isLoaded) {
       this._isLoaded = false;
       this._dispose();
-      getMemoryManager().untrack(this.id);
+      this.memory.untrack(this.id);
     }
   }
 };
@@ -2672,17 +2712,16 @@ async function loadModelFromBuffer(data, options = {}) {
   const runtime = await manager.getRuntime(options.runtime ?? "auto");
   return runtime.loadModel(data, options);
 }
-async function runInference(model, inputs) {
+async function runInference(model, inputs, context = {}) {
   if (!model.isLoaded) {
     throw new WebInferError("Model has been disposed", ErrorCodes.MODEL_NOT_LOADED, { modelId: model.id });
   }
   const manager = RuntimeManager.getInstance();
   const runtime = await manager.getRuntime(model.runtime);
   const scheduler = getScheduler();
-  const task = scheduler.schedule(model.id, () => runtime.run(model, inputs));
-  return task.wait();
+  return scheduler.execute(model.id, () => runtime.run(model, inputs), context, (outputs) => outputs.forEach((t) => t.dispose()));
 }
-async function runInferenceNamed(model, namedInputs) {
+async function runInferenceNamed(model, namedInputs, context = {}) {
   if (!model.isLoaded) {
     throw new WebInferError("Model has been disposed", ErrorCodes.MODEL_NOT_LOADED, { modelId: model.id });
   }
@@ -2692,15 +2731,10 @@ async function runInferenceNamed(model, namedInputs) {
     throw new WebInferError("Runtime does not support named inputs", ErrorCodes.INFERENCE_FAILED, { modelId: model.id });
   }
   const scheduler = getScheduler();
-  const task = scheduler.schedule(model.id, () => runtime.runNamed(model, namedInputs));
-  return task.wait();
+  return scheduler.execute(model.id, () => runtime.runNamed(model, namedInputs), context, (outputs) => outputs.forEach((t) => t.dispose()));
 }
-async function runBatchInference(model, batches) {
-  const scheduler = getScheduler();
-  const manager = RuntimeManager.getInstance();
-  const runtime = await manager.getRuntime(model.runtime);
-  const tasks = batches.map((inputs) => scheduler.schedule(model.id, () => runtime.run(model, inputs)));
-  return Promise.all(tasks.map((task) => task.wait()));
+async function runBatchInference(model, batches, context = {}) {
+  return Promise.all(batches.map((inputs) => runInference(model, inputs, context)));
 }
 function getRuntimeManager() {
   return RuntimeManager.getInstance();
@@ -3660,13 +3694,16 @@ async function getOrt() {
 async function isOnnxAvailable() {
   return await getOrt() != null;
 }
-var sessionStore = /* @__PURE__ */ new Map();
 var ONNXRuntime = class {
-  constructor() {
+  constructor(memory = new MemoryManager()) {
+    __publicField(this, "memory");
     __publicField(this, "name", "wasm");
     // Register as wasm since it's the fallback
+    __publicField(this, "sessionStore", /* @__PURE__ */ new Map());
+    __publicField(this, "releases", /* @__PURE__ */ new Set());
     __publicField(this, "initialized", false);
     __publicField(this, "executionProvider", "wasm");
+    this.memory = memory;
   }
   get capabilities() {
     return {
@@ -3689,6 +3726,7 @@ var ONNXRuntime = class {
    * Initialize the ONNX runtime
    */
   async initialize() {
+    var _a;
     if (this.initialized)
       return;
     const ortModule = await getOrt();
@@ -3696,7 +3734,7 @@ var ONNXRuntime = class {
       throw new WebInferError("onnxruntime-web is not installed. Install it with: npm install onnxruntime-web", ErrorCodes.RUNTIME_NOT_AVAILABLE);
     }
     if (typeof window !== "undefined" && ortModule.env?.wasm) {
-      ortModule.env.wasm.wasmPaths = "/ort/";
+      (_a = ortModule.env.wasm).wasmPaths ?? (_a.wasmPaths = "/ort/");
       ortModule.env.wasm.numThreads = 1;
     }
     this.initialized = true;
@@ -3722,10 +3760,11 @@ var ONNXRuntime = class {
       const inputNames = session.inputNames;
       const outputNames = session.outputNames;
       const modelId = `onnx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-      sessionStore.set(modelId, {
+      this.sessionStore.set(modelId, {
         session,
         inputNames: [...inputNames],
-        outputNames: [...outputNames]
+        outputNames: [...outputNames],
+        active: /* @__PURE__ */ new Set()
       });
       const metadata = {
         name: options.metadata?.name ?? "onnx-model",
@@ -3745,9 +3784,11 @@ var ONNXRuntime = class {
         quantization: options.quantization ?? "float32",
         format: "onnx"
       };
-      const model = new LoadedModelImpl(metadata, "wasm", () => this.unloadModel(modelId));
+      const model = new LoadedModelImpl(metadata, "wasm", () => {
+        void this.unloadModel(modelId);
+      }, this.memory);
       Object.defineProperty(model, "id", { value: modelId, writable: false });
-      getMemoryManager().trackModel(model, () => model.dispose());
+      this.memory.trackModel(model, () => model.dispose());
       return model;
     } catch (error) {
       throw new WebInferError(`Failed to load ONNX model: ${error instanceof Error ? error.message : String(error)}`, ErrorCodes.MODEL_LOAD_FAILED, { error });
@@ -3757,116 +3798,83 @@ var ONNXRuntime = class {
    * Run inference
    */
   async run(model, inputs) {
-    const sessionData = sessionStore.get(model.id);
-    if (!sessionData) {
-      throw new WebInferError(`ONNX session not found for model ${model.id}`, ErrorCodes.MODEL_NOT_LOADED, { modelId: model.id });
-    }
-    const { session, inputNames, outputNames } = sessionData;
+    const data = this.sessionStore.get(model.id);
+    if (!data)
+      throw new Error(`ONNX session not found for model ${model.id}`);
+    if (inputs.length !== data.inputNames.length)
+      throw new Error("Incorrect ONNX input count");
+    return this.runNamed(model, new Map(data.inputNames.map((name, i) => [name, inputs[i]])));
+  }
+  async runNamed(model, inputs) {
+    const data = this.sessionStore.get(model.id);
+    if (!data || !model.isLoaded)
+      throw new Error(`ONNX session not found for model ${model.id}`);
+    const operation = this.execute(data, inputs);
+    data.active.add(operation);
     try {
-      const ortModule = await getOrt();
-      const feeds = {};
-      for (let i = 0; i < Math.min(inputs.length, inputNames.length); i++) {
-        const inputName = inputNames[i];
-        const inputTensor = inputs[i];
-        if (inputName && inputTensor) {
-          const dtype = inputTensor.dtype;
-          let ortTensor;
-          if (dtype === "int64") {
-            const data = inputTensor.data;
-            ortTensor = new ortModule.Tensor("int64", data, inputTensor.shape);
-          } else if (dtype === "int32") {
-            const data = inputTensor.data;
-            ortTensor = new ortModule.Tensor("int32", data, inputTensor.shape);
-          } else {
-            const data = inputTensor.toFloat32Array();
-            ortTensor = new ortModule.Tensor("float32", data, inputTensor.shape);
-          }
-          feeds[inputName] = ortTensor;
-        }
+      return await operation;
+    } finally {
+      data.active.delete(operation);
+    }
+  }
+  async execute(data, inputs) {
+    const ortModule = await getOrt();
+    const feeds = {};
+    let results = {};
+    const outputs = [];
+    try {
+      for (const name of data.inputNames) {
+        const input = inputs.get(name);
+        if (!input)
+          throw new Error(`Missing ONNX input '${name}'`);
+        feeds[name] = new ortModule.Tensor(input.dtype, input.data, [...input.shape]);
       }
-      const results = await session.run(feeds);
-      const outputs = [];
-      for (const outputName of outputNames) {
-        const ortTensor = results[outputName];
-        if (ortTensor) {
-          const data = ortTensor.data;
-          const shape = Array.from(ortTensor.dims).map((d) => Number(d));
-          outputs.push(new WebInferTensor(new Float32Array(data), shape, "float32"));
-        }
+      results = await data.session.run(feeds);
+      for (const name of data.outputNames) {
+        const output = results[name];
+        if (!output)
+          throw new Error(`Missing ONNX output '${name}'`);
+        outputs.push(new WebInferTensor(output.data.slice(), Array.from(output.dims), output.type));
       }
       return outputs;
     } catch (error) {
-      throw new WebInferError(`ONNX inference failed: ${error instanceof Error ? error.message : String(error)}`, ErrorCodes.INFERENCE_FAILED, { modelId: model.id, error });
+      outputs.forEach((t) => t.dispose());
+      throw new WebInferError(`ONNX inference failed: ${String(error)}`, ErrorCodes.INFERENCE_FAILED, { error });
+    } finally {
+      for (const tensor2 of [...Object.values(feeds), ...Object.values(results)])
+        tensor2.dispose?.();
     }
   }
-  /**
-   * Run inference with named inputs
-   */
-  async runNamed(model, namedInputs) {
-    const sessionData = sessionStore.get(model.id);
-    if (!sessionData) {
-      throw new WebInferError(`ONNX session not found for model ${model.id}`, ErrorCodes.MODEL_NOT_LOADED, { modelId: model.id });
-    }
-    const { session, inputNames, outputNames } = sessionData;
-    try {
-      const ortModule = await getOrt();
-      const feeds = {};
-      for (const [inputName, inputTensor] of namedInputs) {
-        const tensor2 = inputTensor;
-        const dtype = tensor2.dtype;
-        let ortTensor;
-        if (dtype === "int64") {
-          const data = tensor2.data;
-          ortTensor = new ortModule.Tensor("int64", data, tensor2.shape);
-        } else if (dtype === "int32") {
-          const data = tensor2.data;
-          ortTensor = new ortModule.Tensor("int32", data, tensor2.shape);
-        } else {
-          const data = tensor2.toFloat32Array();
-          ortTensor = new ortModule.Tensor("float32", data, tensor2.shape);
-        }
-        feeds[inputName] = ortTensor;
-      }
-      const results = await session.run(feeds);
-      const outputs = [];
-      for (const outputName of outputNames) {
-        const ortTensor = results[outputName];
-        if (ortTensor) {
-          const data = ortTensor.data;
-          const shape = Array.from(ortTensor.dims).map((d) => Number(d));
-          outputs.push(new WebInferTensor(new Float32Array(data), shape, "float32"));
-        }
-      }
-      return outputs;
-    } catch (error) {
-      throw new WebInferError(`ONNX inference failed: ${error instanceof Error ? error.message : String(error)}`, ErrorCodes.INFERENCE_FAILED, { modelId: model.id, expectedInputs: inputNames, providedInputs: Array.from(namedInputs.keys()), error });
-    }
+  unloadModel(modelId) {
+    const data = this.sessionStore.get(modelId);
+    if (!data)
+      return Promise.resolve();
+    this.sessionStore.delete(modelId);
+    const release2 = (async () => {
+      await Promise.allSettled(data.active);
+      await data.session.release();
+    })();
+    this.releases.add(release2);
+    void release2.then(() => this.releases.delete(release2), () => void 0);
+    return release2;
   }
-  /**
-   * Unload a model
-   */
-  async unloadModel(modelId) {
-    const sessionData = sessionStore.get(modelId);
-    if (sessionData) {
-      sessionStore.delete(modelId);
-    }
-  }
-  /**
-   * Dispose the runtime
-   */
-  dispose() {
-    sessionStore.clear();
+  async dispose() {
+    for (const id of this.sessionStore.keys())
+      void this.unloadModel(id);
+    const releases = [...this.releases];
+    await Promise.all(releases);
+    this.releases.clear();
     this.initialized = false;
   }
 };
-function createONNXRuntime() {
-  return new ONNXRuntime();
+function createONNXRuntime(memory) {
+  return new ONNXRuntime(memory);
 }
 
 // dist/backends/transformers-adapter.js
 init_types();
 init_tensor();
-var sessionStore2 = /* @__PURE__ */ new Map();
+var sessionStore = /* @__PURE__ */ new Map();
 var adapterOptions = null;
 var TransformersAdapterRuntime = class {
   constructor() {
@@ -3904,11 +3912,11 @@ var TransformersAdapterRuntime = class {
     };
     const modelId = `tjs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const model = new LoadedModelImpl(metadata, this.name, () => {
-      const session = sessionStore2.get(modelId);
+      const session = sessionStore.get(modelId);
       if (session?.instance.dispose) {
         session.instance.dispose();
       }
-      sessionStore2.delete(modelId);
+      sessionStore.delete(modelId);
     });
     getMemoryManager().trackModel(model, () => model.dispose());
     return model;
@@ -3929,7 +3937,7 @@ var TransformersAdapterRuntime = class {
       opts["dtype"] = adapterOptions.dtype;
     const instance = await adapterOptions.pipelineFactory(task, model, opts);
     const modelId = `tjs_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    sessionStore2.set(modelId, { instance, task, model });
+    sessionStore.set(modelId, { instance, task, model });
     return modelId;
   }
   /**
@@ -3938,7 +3946,7 @@ var TransformersAdapterRuntime = class {
    * (since transformers.js returns task-specific objects, not raw tensors).
    */
   async run(model, inputs) {
-    const session = sessionStore2.get(model.id);
+    const session = sessionStore.get(model.id);
     if (!session) {
       throw new WebInferError(`No transformers.js session for model ${model.id}`, ErrorCodes.MODEL_NOT_LOADED);
     }
@@ -3952,18 +3960,18 @@ var TransformersAdapterRuntime = class {
    * Returns the raw result object (not a tensor).
    */
   async runDirect(modelId, input, options) {
-    const session = sessionStore2.get(modelId);
+    const session = sessionStore.get(modelId);
     if (!session) {
       throw new WebInferError(`No transformers.js session for model ${modelId}`, ErrorCodes.MODEL_NOT_LOADED);
     }
     return session.instance(input, options);
   }
   dispose() {
-    for (const [id, session] of sessionStore2) {
+    for (const [id, session] of sessionStore) {
       if (session.instance.dispose) {
         session.instance.dispose();
       }
-      sessionStore2.delete(id);
+      sessionStore.delete(id);
     }
   }
 };
@@ -3978,10 +3986,10 @@ function getTransformersAdapter() {
 }
 
 // dist/backends/index.js
-function registerAllBackends() {
-  registerRuntime("wasm", createONNXRuntime);
+function registerAllBackends(manager = getRuntimeManager()) {
+  if (!manager.has("wasm"))
+    manager.register("wasm", createONNXRuntime);
 }
-registerAllBackends();
 
 // dist/utils/cache.js
 var Cache = class {
@@ -4377,12 +4385,14 @@ function createCache(preset = "medium", options = {}) {
 // dist/pipelines/base.js
 var BasePipeline = class {
   constructor(config) {
+    __publicField(this, "inference");
     __publicField(this, "model", null);
     __publicField(this, "config");
     __publicField(this, "modelCache");
     __publicField(this, "downloadCache");
     __publicField(this, "isReady", false);
     this.config = config;
+    this.inference = config.engine ?? runtime_exports;
     this.modelCache = new ModelCache();
     this.downloadCache = new ModelDownloadCache();
   }
@@ -4424,7 +4434,7 @@ var BasePipeline = class {
       }
     } catch {
     }
-    return loadModel(modelPath, {
+    return this.inference.loadModel(modelPath, {
       runtime: this.config.runtime,
       quantization: this.config.quantization,
       cache: this.config.cache
@@ -4437,7 +4447,7 @@ var BasePipeline = class {
     await this.initialize();
     const startTime = performance.now();
     const preprocessed = await this.preprocess(input);
-    const outputs = await runInference(this.model, preprocessed);
+    const outputs = await this.inference.runInference(this.model, preprocessed, options);
     const result = await this.postprocess(outputs, options);
     if (result && typeof result === "object" && "processingTime" in result) {
       result.processingTime = performance.now() - startTime;
@@ -5114,14 +5124,19 @@ var TextClassificationPipeline = class extends BasePipeline {
     this.tokenizerUrl = DEFAULT_MODELS.tokenizer;
   }
   async initialize() {
-    await super.initialize();
     if (!this.tokenizer) {
       this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
     }
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
+  }
+  dispose() {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
   setLabels(labels) {
     this.labels = labels;
@@ -5134,9 +5149,14 @@ var TextClassificationPipeline = class extends BasePipeline {
     const results = [];
     for (const text of inputs) {
       const tensorInputs = await this.preprocess(text);
-      const outputs = await this.runInference(tensorInputs);
-      const result = await this.postprocess(outputs, options);
-      results.push(result);
+      let outputs = [];
+      try {
+        outputs = await this.runInference(tensorInputs, options);
+        results.push(await this.postprocess(outputs, options));
+      } finally {
+        tensorInputs.forEach((t) => t.dispose());
+        outputs.forEach((t) => t.dispose());
+      }
     }
     const processingTime = performance.now() - startTime;
     for (const result of results) {
@@ -5155,11 +5175,11 @@ var TextClassificationPipeline = class extends BasePipeline {
     const attentionMask = new WebInferTensor(BigInt64Array.from(encoded.attentionMask.map((m) => BigInt(m))), [1, encoded.attentionMask.length], "int64");
     return [inputIds, attentionMask];
   }
-  async runInference(inputs) {
+  async runInference(inputs, options) {
     const namedInputs = /* @__PURE__ */ new Map();
     namedInputs.set("input_ids", inputs[0]);
     namedInputs.set("attention_mask", inputs[1]);
-    const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
+    const outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
     return outputs;
   }
   async postprocess(outputs, options) {
@@ -5169,6 +5189,7 @@ var TextClassificationPipeline = class extends BasePipeline {
     }
     const probs = softmax(logits, -1);
     const probsArray = probs.toFloat32Array();
+    probs.dispose();
     let maxIdx = 0;
     let maxScore = probsArray[0] ?? 0;
     for (let i = 1; i < probsArray.length; i++) {
@@ -5234,14 +5255,19 @@ var FeatureExtractionPipeline = class extends BasePipeline {
     this.tokenizerUrl = DEFAULT_MODELS2.tokenizer;
   }
   async initialize() {
-    await super.initialize();
     if (!this.tokenizer) {
       this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
     }
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
+  }
+  dispose() {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
   async run(input, options) {
     const isBatch = Array.isArray(input);
@@ -5251,9 +5277,14 @@ var FeatureExtractionPipeline = class extends BasePipeline {
     const results = [];
     for (const text of inputs) {
       const tensorInputs = await this.preprocess(text);
-      const outputs = await this.runInference(tensorInputs);
-      const result = await this.postprocess(outputs, options);
-      results.push(result);
+      let outputs = [];
+      try {
+        outputs = await this.runInference(tensorInputs, options);
+        results.push(await this.postprocess(outputs, options));
+      } finally {
+        tensorInputs.forEach((t) => t.dispose());
+        outputs.forEach((t) => t.dispose());
+      }
     }
     const processingTime = performance.now() - startTime;
     for (const result of results) {
@@ -5273,12 +5304,12 @@ var FeatureExtractionPipeline = class extends BasePipeline {
     const tokenTypeIds = new WebInferTensor(BigInt64Array.from(encoded.inputIds.map(() => BigInt(0))), [1, encoded.inputIds.length], "int64");
     return [inputIds, attentionMask, tokenTypeIds];
   }
-  async runInference(inputs) {
+  async runInference(inputs, options) {
     const namedInputs = /* @__PURE__ */ new Map();
     namedInputs.set("input_ids", inputs[0]);
     namedInputs.set("attention_mask", inputs[1]);
     namedInputs.set("token_type_ids", inputs[2]);
-    const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
+    const outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
     return outputs;
   }
   async postprocess(outputs, options) {
@@ -5972,14 +6003,19 @@ var ImageClassificationPipeline = class extends BasePipeline {
     this.modelUrl = config.model !== "default" ? config.model : DEFAULT_MODELS3.model;
   }
   async initialize() {
-    await super.initialize();
     if (!this.preprocessor) {
       this.preprocessor = createImagePreprocessor("imagenet");
     }
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
+  }
+  dispose() {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
   setLabels(labels) {
     this.labels = labels;
@@ -5992,9 +6028,14 @@ var ImageClassificationPipeline = class extends BasePipeline {
     const results = [];
     for (const image of inputs) {
       const tensorInputs = await this.preprocess(image);
-      const outputs = await this.runModelInference(tensorInputs);
-      const result = await this.postprocess(outputs, options);
-      results.push(result);
+      let outputs = [];
+      try {
+        outputs = await this.runModelInference(tensorInputs, options);
+        results.push(await this.postprocess(outputs, options));
+      } finally {
+        tensorInputs.forEach((t) => t.dispose());
+        outputs.forEach((t) => t.dispose());
+      }
     }
     const processingTime = performance.now() - startTime;
     for (const result of results) {
@@ -6010,8 +6051,8 @@ var ImageClassificationPipeline = class extends BasePipeline {
     }
     return [tensor2];
   }
-  async runModelInference(inputs) {
-    const outputs = await runInference(this.onnxModel, inputs);
+  async runModelInference(inputs, options) {
+    const outputs = await this.inference.runInference(this.onnxModel, inputs, options);
     return outputs;
   }
   async postprocess(outputs, options) {
@@ -6021,6 +6062,7 @@ var ImageClassificationPipeline = class extends BasePipeline {
     }
     const probs = softmax(logits, -1);
     const probsArray = probs.toFloat32Array();
+    probs.dispose();
     let maxIdx = 0;
     let maxScore = probsArray[0] ?? 0;
     for (let i = 1; i < probsArray.length; i++) {
@@ -6114,7 +6156,7 @@ var TextGenerationPipeline = class extends BasePipeline {
         progress: Math.round(loaded / total * 100)
       });
     });
-    this.llmModel = await loadModelFromBuffer(modelData, {
+    this.llmModel = await this.inference.loadModelFromBuffer(modelData, {
       runtime: "wasm"
       // Uses ONNXRuntime which auto-detects WebGPU internally
     });
@@ -6225,7 +6267,7 @@ var TextGenerationPipeline = class extends BasePipeline {
     for (let i = 0; i < maxNewTokens; i++) {
       if (inputIds.length >= maxLength)
         break;
-      const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample);
+      const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample, options);
       if (nextTokenId === this.eosTokenId) {
         yield {
           token: "",
@@ -6281,7 +6323,7 @@ var TextGenerationPipeline = class extends BasePipeline {
     for (let i = 0; i < maxNewTokens; i++) {
       if (inputIds.length >= maxLength)
         break;
-      const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample);
+      const nextTokenId = await this.generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample, options);
       if (nextTokenId === this.eosTokenId)
         break;
       generatedIds.push(nextTokenId);
@@ -6314,7 +6356,7 @@ var TextGenerationPipeline = class extends BasePipeline {
   /**
    * Generate next token using the model
    */
-  async generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample) {
+  async generateNextToken(inputIds, temperature, topK, topP, repetitionPenalty, doSample, options) {
     if (!this.model) {
       throw new Error("Model not loaded");
     }
@@ -6330,7 +6372,7 @@ var TextGenerationPipeline = class extends BasePipeline {
       inputs.set(`past_key_values.${i}.key`, new WebInferTensor(new Float32Array(0), [1, numKVHeads, 0, headDim], "float32"));
       inputs.set(`past_key_values.${i}.value`, new WebInferTensor(new Float32Array(0), [1, numKVHeads, 0, headDim], "float32"));
     }
-    const outputs = await runInferenceNamed(this.model, inputs);
+    const outputs = await this.inference.runInferenceNamed(this.model, inputs, options);
     if (!outputs || outputs.length === 0) {
       throw new Error("Model returned no outputs");
     }
@@ -6832,7 +6874,7 @@ var ObjectDetectionPipeline = class extends BasePipeline {
     await super.initialize();
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData);
     }
   }
   setLabels(labels) {
@@ -6841,7 +6883,7 @@ var ObjectDetectionPipeline = class extends BasePipeline {
   async run(input, options) {
     await this.initialize();
     const tensorInputs = await this.preprocess(input);
-    const outputs = await this.runModelInference(tensorInputs);
+    const outputs = await this.runModelInference(tensorInputs, options);
     return this.postprocess(outputs, options);
   }
   async preprocess(input) {
@@ -6852,8 +6894,8 @@ var ObjectDetectionPipeline = class extends BasePipeline {
     }
     return [await this.preprocessor.processBatch(inputs)];
   }
-  async runModelInference(inputs) {
-    const outputs = await runInference(this.onnxModel, inputs);
+  async runModelInference(inputs, options) {
+    const outputs = await this.inference.runInference(this.onnxModel, inputs, options);
     return outputs;
   }
   async postprocess(outputs, options) {
@@ -7029,11 +7071,11 @@ var AutomaticSpeechRecognitionPipeline = class extends BasePipeline {
     }
     if (!this.encoderModel) {
       const data = await loadModelData(this.encoderUrl, { cache: this.config.cache ?? true });
-      this.encoderModel = await loadModelFromBuffer(data);
+      this.encoderModel = await this.inference.loadModelFromBuffer(data);
     }
     if (!this.decoderModel) {
       const data = await loadModelData(this.decoderUrl, { cache: this.config.cache ?? true });
-      this.decoderModel = await loadModelFromBuffer(data);
+      this.decoderModel = await this.inference.loadModelFromBuffer(data);
     }
   }
   setTokenizer(tokenizer) {
@@ -7055,11 +7097,11 @@ var AutomaticSpeechRecognitionPipeline = class extends BasePipeline {
     const startTime = performance.now();
     const melTensor = await this.audioPreprocessor.process(audio);
     const melInput = new WebInferTensor(melTensor.toFloat32Array(), [1, ...melTensor.shape], "float32");
-    const encoderOutputs = await runInference(this.encoderModel, [melInput]);
+    const encoderOutputs = await this.inference.runInference(this.encoderModel, [melInput], options);
     const encoderHidden = encoderOutputs[0];
     const task = options.task ?? "transcribe";
     const initialTokens = this.buildInitialTokens(task, options.language);
-    const generatedTokens = await this.autoregressiveDecode(encoderHidden, initialTokens);
+    const generatedTokens = await this.autoregressiveDecode(encoderHidden, initialTokens, options);
     const text = this.tokenizer.decode(generatedTokens, true);
     const result = {
       text: text.trim(),
@@ -7106,14 +7148,14 @@ var AutomaticSpeechRecognitionPipeline = class extends BasePipeline {
    * Autoregressive decoder loop similar to text-generation.
    * Feeds encoder hidden states + growing token sequence to decoder.
    */
-  async autoregressiveDecode(encoderHidden, initialTokens) {
+  async autoregressiveDecode(encoderHidden, initialTokens, options) {
     const tokens = [...initialTokens];
     for (let step = 0; step < MAX_DECODER_TOKENS; step++) {
       const decoderInputIds = new WebInferTensor(BigInt64Array.from(tokens.map((t) => BigInt(t))), [1, tokens.length], "int64");
       const namedInputs = /* @__PURE__ */ new Map();
       namedInputs.set("input_ids", decoderInputIds);
       namedInputs.set("encoder_hidden_states", encoderHidden);
-      const decoderOutputs = await runInferenceNamed(this.decoderModel, namedInputs);
+      const decoderOutputs = await this.inference.runInferenceNamed(this.decoderModel, namedInputs, options);
       const logits = decoderOutputs[0].toFloat32Array();
       const vocabSize = logits.length / tokens.length;
       const lastTokenLogits = logits.slice((tokens.length - 1) * vocabSize);
@@ -7260,14 +7302,14 @@ var ZeroShotClassificationPipeline = class extends BasePipeline {
     this.tokenizerUrl = DEFAULT_MODELS6.tokenizer;
   }
   async initialize() {
-    await super.initialize();
     if (!this.tokenizer) {
       this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
     }
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
   }
   setTokenizer(tokenizer) {
     this.tokenizer = tokenizer;
@@ -7282,15 +7324,15 @@ var ZeroShotClassificationPipeline = class extends BasePipeline {
     const texts = Array.isArray(text) ? text : [text];
     const template = opts.hypothesisTemplate ?? this.hypothesisTemplate;
     const multiLabel = opts.multiLabel ?? false;
-    const results = await Promise.all(texts.map((t) => this.classifySingle(t, candidateLabels, template, multiLabel)));
+    const results = await Promise.all(texts.map((t) => this.classifySingle(t, candidateLabels, template, multiLabel, options)));
     return Array.isArray(text) ? results : results[0];
   }
-  async classifySingle(text, candidateLabels, template, multiLabel) {
+  async classifySingle(text, candidateLabels, template, multiLabel, options) {
     const startTime = performance.now();
     const hypotheses = candidateLabels.map((label) => template.replace("{label}", label));
     const scores = [];
     for (const hypothesis of hypotheses) {
-      const score = await this.scoreHypothesis(text, hypothesis);
+      const score = await this.scoreHypothesis(text, hypothesis, options);
       scores.push(score);
     }
     let normalizedScores;
@@ -7298,7 +7340,10 @@ var ZeroShotClassificationPipeline = class extends BasePipeline {
       normalizedScores = scores.map((s) => 1 / (1 + Math.exp(-s)));
     } else {
       const tensor2 = new WebInferTensor(new Float32Array(scores), [scores.length], "float32");
-      normalizedScores = Array.from(softmax(tensor2).toFloat32Array());
+      const probs = softmax(tensor2);
+      normalizedScores = Array.from(probs.toFloat32Array());
+      probs.dispose();
+      tensor2.dispose();
     }
     const indexed = candidateLabels.map((label, i) => ({
       label,
@@ -7316,7 +7361,7 @@ var ZeroShotClassificationPipeline = class extends BasePipeline {
    * Score a single hypothesis using the real NLI ONNX model.
    * Returns the entailment logit.
    */
-  async scoreHypothesis(premise, hypothesis) {
+  async scoreHypothesis(premise, hypothesis, options) {
     const encoded = this.tokenizer.encode(premise, {
       textPair: hypothesis,
       addSpecialTokens: true,
@@ -7329,9 +7374,20 @@ var ZeroShotClassificationPipeline = class extends BasePipeline {
     const namedInputs = /* @__PURE__ */ new Map();
     namedInputs.set("input_ids", inputIds);
     namedInputs.set("attention_mask", attentionMask);
-    const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
-    const logits = outputs[0].toFloat32Array();
-    return logits[ENTAILMENT_IDX] ?? 0;
+    let outputs = [];
+    try {
+      outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
+      return outputs[0].toFloat32Array()[ENTAILMENT_IDX] ?? 0;
+    } finally {
+      inputIds.dispose();
+      attentionMask.dispose();
+      outputs.forEach((t) => t.dispose());
+    }
+  }
+  dispose() {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
   async preprocess(input) {
     const { text, candidateLabels } = input;
@@ -7381,7 +7437,7 @@ var QuestionAnsweringPipeline = class extends BasePipeline {
     }
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData);
     }
   }
   setTokenizer(tokenizer) {
@@ -7410,7 +7466,7 @@ var QuestionAnsweringPipeline = class extends BasePipeline {
     const namedInputs = /* @__PURE__ */ new Map();
     namedInputs.set("input_ids", inputIds);
     namedInputs.set("attention_mask", attentionMask);
-    const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
+    const outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
     if (outputs.length < 2) {
       return { answer: "", score: 0, start: 0, end: 0, processingTime: performance.now() - startTime };
     }
@@ -7548,9 +7604,8 @@ var ImageSegmentationPipeline = class extends BasePipeline {
         progress: Math.round(loaded / total * 100)
       });
     });
-    this.encoderModel = await loadModelFromBuffer(encoderData, {
-      runtime: "wasm"
-      // Uses ONNXRuntime which auto-detects WebGPU internally
+    this.encoderModel = await this.inference.loadModelFromBuffer(encoderData, {
+      runtime: this.config.runtime
     });
     onProgress?.({ model: "decoder", loaded: 0, total: 100, progress: 0 });
     const decoderData = await this.fetchModelWithProgress(this.decoderUrl, (loaded, total) => {
@@ -7561,9 +7616,8 @@ var ImageSegmentationPipeline = class extends BasePipeline {
         progress: Math.round(loaded / total * 100)
       });
     });
-    this.decoderModel = await loadModelFromBuffer(decoderData, {
-      runtime: "wasm"
-      // Uses ONNXRuntime which auto-detects WebGPU internally
+    this.decoderModel = await this.inference.loadModelFromBuffer(decoderData, {
+      runtime: this.config.runtime
     });
     this.modelsLoaded = true;
   }
@@ -7613,25 +7667,26 @@ var ImageSegmentationPipeline = class extends BasePipeline {
    * Load encoder model (processes the image once)
    */
   async loadEncoder(modelUrl) {
-    this.encoderModel = await loadModel(modelUrl, {
-      runtime: "wasm"
+    this.encoderModel = await this.inference.loadModel(modelUrl, {
+      runtime: this.config.runtime
     });
   }
   /**
    * Load decoder model (processes prompts to generate masks)
    */
   async loadDecoder(modelUrl) {
-    this.decoderModel = await loadModel(modelUrl, {
-      runtime: "wasm"
+    this.decoderModel = await this.inference.loadModel(modelUrl, {
+      runtime: this.config.runtime
     });
   }
   /**
    * Set and encode the image (call once per image)
    */
-  async setImage(image) {
+  async setImage(image, options) {
     if (!this.modelsLoaded) {
       throw new Error("Models not loaded. Call loadModels() first.");
     }
+    this.clearImage();
     const imageData = await this.loadImage(image);
     this.currentImageSize = {
       width: imageData.width,
@@ -7640,7 +7695,7 @@ var ImageSegmentationPipeline = class extends BasePipeline {
     const { tensor: inputTensor, resizedSize } = this.preprocessImage(imageData);
     this.resizedImageSize = resizedSize;
     if (this.encoderModel) {
-      const outputs = await runInference(this.encoderModel, [inputTensor]);
+      const outputs = await this.inference.runInference(this.encoderModel, [inputTensor], options).finally(() => inputTensor.dispose());
       this.imageEmbedding = outputs[0];
       this.imagePositionalEmbedding = outputs[1];
       console.log("[SAM] Encoder outputs:", outputs.length);
@@ -7671,18 +7726,27 @@ var ImageSegmentationPipeline = class extends BasePipeline {
     } else {
       throw new Error("image_positional_embeddings not available from encoder");
     }
-    const outputs = await runInferenceNamed(this.decoderModel, decoderInputs);
+    const outputs = await this.inference.runInferenceNamed(this.decoderModel, decoderInputs, options).finally(() => {
+      for (const t of decoderInputs.values()) {
+        if (t !== this.imageEmbedding && t !== this.imagePositionalEmbedding)
+          t.dispose();
+      }
+    });
     const masks = outputs[0];
     const scores = outputs[1];
-    const result = this.postprocessMasks(masks, scores, maskThreshold, returnAllMasks);
-    result.processingTime = performance.now() - startTime;
-    return result;
+    try {
+      const result = this.postprocessMasks(masks, scores, maskThreshold, returnAllMasks);
+      result.processingTime = performance.now() - startTime;
+      return result;
+    } finally {
+      outputs.forEach((t) => t.dispose());
+    }
   }
   /**
    * Run segmentation (implements BasePipeline interface)
    */
   async run(input, options) {
-    await this.setImage(input);
+    await this.setImage(input, options);
     return this.segment(options);
   }
   /**
@@ -7891,12 +7955,6 @@ var ImageSegmentationPipeline = class extends BasePipeline {
   /**
    * Clear the current image embedding
    */
-  clearImage() {
-    this.imageEmbedding = null;
-    this.imagePositionalEmbedding = null;
-    this.currentImageSize = null;
-    this.resizedImageSize = null;
-  }
   /**
    * Preprocess (required by BasePipeline)
    */
@@ -7919,7 +7977,16 @@ var ImageSegmentationPipeline = class extends BasePipeline {
   /**
    * Dispose resources
    */
+  clearImage() {
+    this.imageEmbedding?.dispose();
+    this.imagePositionalEmbedding?.dispose();
+    this.imageEmbedding = null;
+    this.imagePositionalEmbedding = null;
+    this.currentImageSize = null;
+    this.resizedImageSize = null;
+  }
   dispose() {
+    this.clearImage();
     super.dispose();
     this.encoderModel?.dispose();
     this.decoderModel?.dispose();
@@ -7943,9 +8010,11 @@ registerPipeline("image-segmentation", (config) => new ImageSegmentationPipeline
 
 // dist/pipelines/index.js
 async function pipeline(task, options) {
-  registerAllBackends();
+  if (!options?.engine)
+    registerAllBackends();
   const config = {
     task,
+    engine: options?.engine,
     model: options?.model ?? "default",
     runtime: options?.runtime,
     cache: options?.cache ?? true,
@@ -8005,7 +8074,7 @@ async function createPipelines(tasks, options) {
   return result;
 }
 
-// dist/core/composer.js
+// dist/pipelines/composer.js
 function compose(stages) {
   if (stages.length === 0) {
     throw new Error("[WebInfer] compose() requires at least one stage");
@@ -8486,6 +8555,141 @@ async function benchmarkMemory(fn, options = {}) {
 // dist/core/index.js
 init_types();
 init_tensor();
+
+// dist/core/engine.js
+var InferenceEngine = class {
+  constructor(options) {
+    __publicField(this, "runtimes", new RuntimeManager());
+    __publicField(this, "scheduler");
+    __publicField(this, "memory", new MemoryManager());
+    __publicField(this, "models", /* @__PURE__ */ new Map());
+    __publicField(this, "pending", /* @__PURE__ */ new Set());
+    __publicField(this, "closed", false);
+    __publicField(this, "disposing");
+    this.scheduler = new InferenceScheduler(options.scheduler);
+    for (const backend of options.backends)
+      this.runtimes.register(backend.type, () => backend.create(this.memory));
+  }
+  operation(fn) {
+    if (this.closed)
+      return Promise.reject(new Error("Engine is disposed"));
+    const promise = fn();
+    this.pending.add(promise);
+    void promise.then(() => this.pending.delete(promise), () => this.pending.delete(promise));
+    return promise;
+  }
+  loadModel(url, options = {}) {
+    return this.operation(async () => {
+      const { loadModelData: loadModelData2 } = await Promise.resolve().then(() => (init_model_loader(), model_loader_exports));
+      const data = await loadModelData2(url, {
+        cache: options.cache,
+        resumable: options.resumable,
+        chunkSize: options.chunkSize,
+        forceDownload: options.forceDownload,
+        onProgress: options.onProgress ? (p) => options.onProgress(p.percent / 100) : void 0
+      });
+      return this.load(data, options);
+    });
+  }
+  loadModelFromBuffer(data, options = {}) {
+    return this.operation(() => this.load(data, options));
+  }
+  async load(data, options) {
+    const runtime = await this.runtimes.getRuntime(options.runtime ?? "auto");
+    const model = await runtime.loadModel(data, options);
+    this.models.set(model, runtime);
+    return model;
+  }
+  runInference(model, inputs, context = {}) {
+    return this.run(model, (runtime) => runtime.run(model, inputs), context);
+  }
+  runInferenceNamed(model, inputs, context = {}) {
+    return this.run(model, (runtime) => {
+      if (!runtime.runNamed)
+        throw new Error("Runtime does not support named inputs");
+      return runtime.runNamed(model, inputs);
+    }, context);
+  }
+  run(model, fn, context) {
+    return this.operation(async () => {
+      throwIfAborted(context.signal);
+      const runtime = this.models.get(model);
+      if (!runtime || !model.isLoaded)
+        throw new Error("Model is disposed or belongs to another engine");
+      return this.scheduler.execute(model.id, () => {
+        if (!model.isLoaded)
+          throw new Error("Model has been disposed");
+        return fn(runtime);
+      }, context, (outputs) => outputs.forEach((t) => t.dispose()));
+    });
+  }
+  dispose() {
+    if (this.disposing)
+      return this.disposing;
+    this.closed = true;
+    this.scheduler.dispose();
+    this.disposing = (async () => {
+      await Promise.allSettled(this.pending);
+      for (const model of this.models.keys())
+        model.dispose();
+      this.models.clear();
+      await this.runtimes.disposeAll();
+      this.memory.dispose();
+    })();
+    return this.disposing;
+  }
+};
+function createInferenceEngine(options) {
+  return new InferenceEngine(options);
+}
+
+// dist/core/task-scope.js
+var TaskScope = class {
+  constructor(id) {
+    __publicField(this, "id");
+    __publicField(this, "controller", new AbortController());
+    __publicField(this, "resources", new MemoryScope());
+    __publicField(this, "pending", /* @__PURE__ */ new Set());
+    __publicField(this, "closing");
+    this.id = id;
+  }
+  get active() {
+    return !this.controller.signal.aborted;
+  }
+  context(priority = "normal") {
+    return { scopeId: this.id, signal: this.controller.signal, priority };
+  }
+  track(resource) {
+    if (!this.active && this.pending.size === 0) {
+      resource.dispose();
+      throwIfAborted(this.controller.signal);
+    }
+    return this.resources.track(resource);
+  }
+  run(fn, priority = "normal") {
+    if (!this.active)
+      return Promise.reject(new DOMException("Scope is closed", "AbortError"));
+    const promise = Promise.resolve().then(async () => {
+      throwIfAborted(this.controller.signal);
+      const result = await fn(this.context(priority));
+      throwIfAborted(this.controller.signal);
+      return result;
+    });
+    this.pending.add(promise);
+    void promise.then(() => this.pending.delete(promise), () => this.pending.delete(promise));
+    return promise;
+  }
+  dispose() {
+    if (this.closing)
+      return this.closing;
+    this.controller.abort();
+    this.closing = (async () => {
+      await Promise.allSettled(this.pending);
+      this.resources.dispose();
+    })();
+    return this.closing;
+  }
+};
 
 // dist/tools/quantization.js
 function calculateQuantParams(data, bits, symmetric, perChannel, channelAxis = 0, shape = []) {
@@ -10810,6 +11014,7 @@ export {
   ImagePreprocessor,
   ImageSegmentationPipeline,
   InferenceCache,
+  InferenceEngine,
   InferenceScheduler,
   LoadedModelImpl,
   MemoryManager,
@@ -10821,6 +11026,7 @@ export {
   RuntimeManager,
   SENTIMENT_LABELS,
   SentimentAnalysisPipeline,
+  TaskScope,
   TextClassificationPipeline,
   TextGenerationPipeline,
   Tokenizer,
@@ -10854,6 +11060,7 @@ export {
   createImageClassificationPipeline,
   createImagePreprocessor,
   createImageSegmentationPipeline,
+  createInferenceEngine,
   createPipelines,
   createSentimentAnalysisPipeline,
   createTensorHeatmap,

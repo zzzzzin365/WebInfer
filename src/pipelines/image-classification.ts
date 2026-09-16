@@ -12,7 +12,6 @@ import {
 import { WebInferTensor, softmax } from '../core/tensor.js';
 import { ImagePreprocessor, createImagePreprocessor } from '../utils/preprocessor.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInference } from '../core/runtime.js';
 import {
   BasePipeline,
   ImageClassificationResult,
@@ -66,16 +65,21 @@ export class ImageClassificationPipeline extends BasePipeline<
   }
 
   override async initialize(): Promise<void> {
-    await super.initialize();
-
     if (!this.preprocessor) {
       this.preprocessor = createImagePreprocessor('imagenet');
     }
 
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
+  }
+
+  override dispose(): void {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
 
   setLabels(labels: string[]): void {
@@ -96,9 +100,14 @@ export class ImageClassificationPipeline extends BasePipeline<
 
     for (const image of inputs) {
       const tensorInputs = await this.preprocess(image);
-      const outputs = await this.runModelInference(tensorInputs);
-      const result = await this.postprocess(outputs, options);
-      results.push(result);
+      let outputs: WebInferTensor[] = [];
+      try {
+        outputs = await this.runModelInference(tensorInputs, options);
+        results.push(await this.postprocess(outputs, options));
+      } finally {
+        tensorInputs.forEach(t => t.dispose());
+        outputs.forEach(t => t.dispose());
+      }
     }
 
     const processingTime = performance.now() - startTime;
@@ -119,8 +128,8 @@ export class ImageClassificationPipeline extends BasePipeline<
     return [tensor];
   }
 
-  private async runModelInference(inputs: WebInferTensor[]): Promise<WebInferTensor[]> {
-    const outputs = await runInference(this.onnxModel!, inputs);
+  private async runModelInference(inputs: WebInferTensor[], options?: PipelineOptions): Promise<WebInferTensor[]> {
+    const outputs = await this.inference.runInference(this.onnxModel!, inputs, options);
     return outputs as WebInferTensor[];
   }
 
@@ -135,6 +144,7 @@ export class ImageClassificationPipeline extends BasePipeline<
 
     const probs = softmax(logits, -1) as WebInferTensor;
     const probsArray = probs.toFloat32Array();
+    probs.dispose();
 
     let maxIdx = 0;
     let maxScore = probsArray[0] ?? 0;

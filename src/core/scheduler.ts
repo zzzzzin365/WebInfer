@@ -1,3 +1,4 @@
+import { throwIfAborted, type ExecutionContext } from './inference-client.js';
 /**
  * WebInfer - Inference Scheduler
  * 
@@ -465,74 +466,60 @@ export class InferenceScheduler {
   /**
    * Process pending tasks
    */
-  private async processQueue(): Promise<void> {
-    if (this.isProcessing || this.disposed) {
-      return;
-    }
-
+  private processQueue(): void {
+    if (this.isProcessing || this.disposed) return;
     this.isProcessing = true;
-
     try {
-      // Find tasks that can be started
-      const tasksToStart: Task[] = [];
-
-      for (const [modelId, queue] of this.queues) {
-        while (!queue.isEmpty() && this.canStartTask(modelId)) {
-          const task = queue.dequeue();
-          if (task && task.status === 'pending') {
-            tasksToStart.push(task);
-            
-            const running = this.getRunningSet(modelId);
-            running.add(task.id);
-            this.globalRunningCount++;
-          }
+      while (this.globalRunningCount < this.options.maxConcurrentTasks) {
+        let next: Task | undefined;
+        for (const [modelId, queue] of this.queues) {
+          while (queue.peek() && queue.peek()!.status !== 'pending') queue.dequeue();
+          const candidate = queue.peek();
+          if (!candidate || !this.canStartTask(modelId)) continue;
+          if (!next || PRIORITY_ORDER[candidate.priority] < PRIORITY_ORDER[next.priority] ||
+            (candidate.priority === next.priority && candidate.createdAt < next.createdAt)) next = candidate;
         }
+        if (!next) break;
+        const task = next;
+        this.queues.get(task.modelId)!.dequeue();
+        this.getRunningSet(task.modelId).add(task.id);
+        this.globalRunningCount++;
+        this.emit('inference:start', { taskId: task.id, modelId: task.modelId });
+        void task.execute().then(() => {
+          this.emit(task.status === 'failed' ? 'inference:error' : 'inference:complete', {
+            taskId: task.id, modelId: task.modelId, error: task.error,
+            duration: (task.completedAt ?? 0) - (task.startedAt ?? 0),
+          });
+        }).finally(() => {
+          this.runningTasks.get(task.modelId)?.delete(task.id);
+          this.globalRunningCount--;
+          this.processQueue();
+        });
       }
+    } finally { this.isProcessing = false; }
+  }
 
-      // Execute tasks concurrently
-      await Promise.all(
-        tasksToStart.map(async (task) => {
-          this.emit('inference:start', { taskId: task.id, modelId: task.modelId });
-
-          try {
-            await task.execute();
-            this.emit('inference:complete', {
-              taskId: task.id,
-              modelId: task.modelId,
-              duration: (task.completedAt ?? 0) - (task.startedAt ?? 0),
-            });
-          } catch (error) {
-            this.emit('inference:error', {
-              taskId: task.id,
-              modelId: task.modelId,
-              error,
-            });
-          } finally {
-            // Clean up
-            const running = this.runningTasks.get(task.modelId);
-            if (running) {
-              running.delete(task.id);
-            }
-            this.globalRunningCount--;
-          }
-        })
-      );
-    } finally {
-      this.isProcessing = false;
-    }
-
-    // Check if there are more tasks to process
-    let hasPending = false;
-    for (const queue of this.queues.values()) {
-      if (!queue.isEmpty()) {
-        hasPending = true;
-        break;
+  /** Cancellation never frees a running slot before the executor settles. */
+  async execute<T>(modelId: string, executor: () => Promise<T>, context: ExecutionContext = {},
+    discard?: (value: T) => void): Promise<T> {
+    throwIfAborted(context.signal);
+    const task = this.schedule(modelId, async () => {
+      throwIfAborted(context.signal);
+      const result = await executor();
+      if (context.signal?.aborted) {
+        discard?.(result);
+        throwIfAborted(context.signal);
       }
-    }
-
-    if (hasPending) {
-      // Use setImmediate-like behavior for next tick processing
-      setTimeout(() => this.processQueue(), 0);
+      return result;
+    }, context.priority);
+    const cancel = () => this.cancelTask(task.id);
+    context.signal?.addEventListener('abort', cancel, { once: true });
+    if (context.signal?.aborted) cancel();
+    try { return await task.wait(); }
+    finally {
+      context.signal?.removeEventListener('abort', cancel);
+      // Scoped engine calls must not retain tensor results in scheduler history.
+      this.allTasks.delete(task.id);
     }
   }
 
@@ -573,6 +560,7 @@ export class InferenceScheduler {
               return result;
             } catch (err) {
               lastError = err instanceof Error ? err : new Error(String(err));
+              if (err instanceof DOMException && err.name === 'AbortError') throw err;
               this.circuitFailure(modelId);
               if (attempt < maxRetries) {
                 const delay = baseDelay * Math.pow(2, attempt);

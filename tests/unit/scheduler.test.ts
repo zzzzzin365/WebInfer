@@ -110,7 +110,9 @@ describe('InferenceScheduler', () => {
 
   describe('Task Cancellation', () => {
     it('should cancel pending task', async () => {
-      // Fill up slots first
+      scheduler.dispose();
+      scheduler = new InferenceScheduler({ maxConcurrentTasks: 1 });
+      // Fill the only slot so the next task is actually pending
       const blocker = scheduler.schedule('blocker', async () => {
         await new Promise(resolve => setTimeout(resolve, 500));
         return 'blocker';

@@ -1,3 +1,5 @@
+import * as legacyInference from '../core/runtime.js';
+import type { InferenceClient } from '../core/inference-client.js';
 /**
  * WebInfer - Base Pipeline
  * 
@@ -10,7 +12,6 @@ import {
   PipelineOptions,
   PipelineTask,
 } from '../core/types.js';
-import { loadModel, runInference } from '../core/runtime.js';
 import { WebInferTensor } from '../core/tensor.js';
 import { ModelCache } from '../core/memory.js';
 import { ModelDownloadCache } from '../utils/cache.js';
@@ -67,6 +68,7 @@ export interface ObjectDetectionResult extends PipelineResult {
  * BasePipeline - Abstract base class for all pipelines
  */
 export abstract class BasePipeline<TInput, TOutput extends PipelineResult | PipelineResult[]> {
+  protected readonly inference: InferenceClient;
   protected model: LoadedModel | null = null;
   protected readonly config: PipelineConfig;
   protected readonly modelCache: ModelCache;
@@ -75,6 +77,7 @@ export abstract class BasePipeline<TInput, TOutput extends PipelineResult | Pipe
 
   constructor(config: PipelineConfig) {
     this.config = config;
+    this.inference = config.engine ?? legacyInference;
     this.modelCache = new ModelCache();
     this.downloadCache = new ModelDownloadCache();
   }
@@ -131,7 +134,7 @@ export abstract class BasePipeline<TInput, TOutput extends PipelineResult | Pipe
     }
 
     // Load into runtime
-    return loadModel(modelPath, {
+    return this.inference.loadModel(modelPath, {
       runtime: this.config.runtime,
       quantization: this.config.quantization,
       cache: this.config.cache,
@@ -150,7 +153,7 @@ export abstract class BasePipeline<TInput, TOutput extends PipelineResult | Pipe
     const preprocessed = await this.preprocess(input);
     
     // Run inference
-    const outputs = await runInference(this.model!, preprocessed);
+    const outputs = await this.inference.runInference(this.model!, preprocessed, options);
     
     // Postprocess
     const result = await this.postprocess(outputs as WebInferTensor[], options);

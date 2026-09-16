@@ -353,7 +353,8 @@ export class MemoryManager {
         this.disposeAll();
         this.disposed = true;
         this.listeners.clear();
-        MemoryManager.instance = null;
+        if (MemoryManager.instance === this)
+            MemoryManager.instance = null;
     }
 }
 // ============================================================================
@@ -411,7 +412,7 @@ export class MemoryScope {
      */
     dispose() {
         // Dispose children first
-        for (const child of this.children) {
+        for (const child of [...this.children]) {
             child.dispose();
         }
         this.children = [];

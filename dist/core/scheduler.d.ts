@@ -1,3 +1,4 @@
+import { type ExecutionContext } from './inference-client.js';
 /**
  * WebInfer - Inference Scheduler
  *
@@ -59,6 +60,8 @@ export declare class InferenceScheduler {
      * Process pending tasks
      */
     private processQueue;
+    /** Cancellation never frees a running slot before the executor settles. */
+    execute<T>(modelId: string, executor: () => Promise<T>, context?: ExecutionContext, discard?: (value: T) => void): Promise<T>;
     /**
      * Schedule a task for execution
      */

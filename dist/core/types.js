@@ -1,8 +1,3 @@
-/**
- * WebInfer - Core Type Definitions
- *
- * This file contains all the core types used throughout the framework.
- */
 // ============================================================================
 // Error Types
 // ============================================================================

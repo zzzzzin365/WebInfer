@@ -1,3 +1,4 @@
+import type { InferenceClient } from '../core/inference-client.js';
 /**
  * WebInfer - Pipeline Exports
  */
@@ -120,6 +121,7 @@ export {
  * Pipeline options for the factory function
  */
 export interface PipelineFactoryOptions {
+  engine?: InferenceClient;
   /** Model ID or URL */
   model?: string;
   /** Runtime to use */
@@ -180,10 +182,11 @@ export async function pipeline<T extends keyof PipelineTaskMap>(
 ): Promise<PipelineTaskMap[T]> {
   // Guarantee backends are registered before any model loads.
   // registerAllBackends() is synchronous and idempotent (safe to call repeatedly).
-  registerAllBackends();
+  if (!options?.engine) registerAllBackends();
 
   const config: PipelineConfig = {
     task: task as PipelineTask,
+    engine: options?.engine,
     model: options?.model ?? 'default',
     runtime: options?.runtime,
     cache: options?.cache ?? true,
@@ -265,3 +268,5 @@ export async function createPipelines<T extends (keyof PipelineTaskMap)[]>(
 
   return result as { [K in T[number]]: PipelineTaskMap[K] };
 }
+
+export { compose, parallel, type CompositionStage, type CompositionResult, type ComposedPipeline } from './composer.js';

@@ -10,7 +10,6 @@ import { PipelineConfig, PipelineOptions, LoadedModel } from '../core/types.js';
 import { AudioPreprocessor, type AudioInput } from '../utils/preprocessor.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInference, runInferenceNamed } from '../core/runtime.js';
 
 // ============================================================================
 // Default Model (Whisper-tiny, quantized encoder + decoder)
@@ -106,12 +105,12 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline<AudioInput 
 
     if (!this.encoderModel) {
       const data = await loadModelData(this.encoderUrl, { cache: this.config.cache ?? true });
-      this.encoderModel = await loadModelFromBuffer(data);
+      this.encoderModel = await this.inference.loadModelFromBuffer(data);
     }
 
     if (!this.decoderModel) {
       const data = await loadModelData(this.decoderUrl, { cache: this.config.cache ?? true });
-      this.decoderModel = await loadModelFromBuffer(data);
+      this.decoderModel = await this.inference.loadModelFromBuffer(data);
     }
   }
 
@@ -150,7 +149,7 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline<AudioInput 
     );
 
     // 2. Run encoder
-    const encoderOutputs = await runInference(this.encoderModel!, [melInput]);
+    const encoderOutputs = await this.inference.runInference(this.encoderModel!, [melInput], options);
     const encoderHidden = encoderOutputs[0] as WebInferTensor;
 
     // 3. Autoregressive decoder loop
@@ -160,6 +159,7 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline<AudioInput 
     const generatedTokens = await this.autoregressiveDecode(
       encoderHidden,
       initialTokens,
+      options,
     );
 
     // 4. Decode tokens to text
@@ -203,6 +203,7 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline<AudioInput 
   private async autoregressiveDecode(
     encoderHidden: WebInferTensor,
     initialTokens: number[],
+    options?: PipelineOptions,
   ): Promise<number[]> {
     const tokens = [...initialTokens];
 
@@ -217,7 +218,7 @@ export class AutomaticSpeechRecognitionPipeline extends BasePipeline<AudioInput 
       namedInputs.set('input_ids', decoderInputIds);
       namedInputs.set('encoder_hidden_states', encoderHidden);
 
-      const decoderOutputs = await runInferenceNamed(this.decoderModel!, namedInputs);
+      const decoderOutputs = await this.inference.runInferenceNamed(this.decoderModel!, namedInputs, options);
       const logits = (decoderOutputs[0] as WebInferTensor).toFloat32Array();
 
       // Get logits for the last token position

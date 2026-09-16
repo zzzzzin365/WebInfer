@@ -7,7 +7,6 @@ import { BasePipeline, registerPipeline } from './base.js';
 import { WebInferTensor, softmax } from '../core/tensor.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInferenceNamed } from '../core/runtime.js';
 // ============================================================================
 // Default Model (DistilBERT fine-tuned on SQuAD)
 // ============================================================================
@@ -38,7 +37,7 @@ export class QuestionAnsweringPipeline extends BasePipeline {
         }
         if (!this.onnxModel) {
             const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-            this.onnxModel = await loadModelFromBuffer(modelData);
+            this.onnxModel = await this.inference.loadModelFromBuffer(modelData);
         }
     }
     setTokenizer(tokenizer) {
@@ -67,7 +66,7 @@ export class QuestionAnsweringPipeline extends BasePipeline {
         const namedInputs = new Map();
         namedInputs.set('input_ids', inputIds);
         namedInputs.set('attention_mask', attentionMask);
-        const outputs = await runInferenceNamed(this.onnxModel, namedInputs);
+        const outputs = await this.inference.runInferenceNamed(this.onnxModel, namedInputs, options);
         if (outputs.length < 2) {
             return { answer: '', score: 0, start: 0, end: 0, processingTime: performance.now() - startTime };
         }

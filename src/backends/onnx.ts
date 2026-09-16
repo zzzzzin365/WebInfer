@@ -19,7 +19,7 @@ import {
 } from '../core/types.js';
 import { LoadedModelImpl } from '../core/runtime.js';
 import { WebInferTensor } from '../core/tensor.js';
-import { getMemoryManager } from '../core/memory.js';
+import { MemoryManager } from '../core/memory.js';
 
 // Lazy-loaded onnxruntime-web module
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -55,9 +55,10 @@ interface ONNXSessionData {
   session: any; // ort.InferenceSession
   inputNames: string[];
   outputNames: string[];
+  active: Set<Promise<unknown>>;
 }
 
-const sessionStore: Map<string, ONNXSessionData> = new Map();
+
 
 // ============================================================================
 // ONNX Runtime Implementation
@@ -69,6 +70,9 @@ const sessionStore: Map<string, ONNXSessionData> = new Map();
 export class ONNXRuntime implements Runtime {
   readonly name: RuntimeType = 'wasm'; // Register as wasm since it's the fallback
   
+  private readonly sessionStore = new Map<string, ONNXSessionData>();
+  private readonly releases = new Set<Promise<void>>();
+  constructor(private readonly memory = new MemoryManager()) {}
   private initialized = false;
   private executionProvider: 'webgpu' | 'wasm' = 'wasm';
 
@@ -110,7 +114,7 @@ export class ONNXRuntime implements Runtime {
     // Vite's restriction on importing files from /public as ES modules.
     // Consumers should copy onnxruntime-web/dist/*.wasm to public/ort/.
     if (typeof window !== 'undefined' && ortModule.env?.wasm) {
-      (ortModule.env.wasm as any).wasmPaths = '/ort/';
+      (ortModule.env.wasm as any).wasmPaths ??= '/ort/';
       (ortModule.env.wasm as any).numThreads = 1;
     }
 
@@ -154,10 +158,11 @@ export class ONNXRuntime implements Runtime {
       const modelId = `onnx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
       // Store session
-      sessionStore.set(modelId, {
+      this.sessionStore.set(modelId, {
         session,
         inputNames: [...inputNames],
         outputNames: [...outputNames],
+        active: new Set(),
       });
 
       // Create metadata
@@ -183,14 +188,15 @@ export class ONNXRuntime implements Runtime {
       const model = new LoadedModelImpl(
         metadata,
         'wasm',
-        () => this.unloadModel(modelId)
+        () => { void this.unloadModel(modelId); },
+        this.memory
       );
 
       // Override the ID to match our stored session
       Object.defineProperty(model, 'id', { value: modelId, writable: false });
 
       // Track in memory manager
-      getMemoryManager().trackModel(model, () => model.dispose());
+      this.memory.trackModel(model, () => model.dispose());
 
       return model;
     } catch (error) {
@@ -206,154 +212,71 @@ export class ONNXRuntime implements Runtime {
    * Run inference
    */
   async run(model: LoadedModel, inputs: Tensor[]): Promise<Tensor[]> {
-    const sessionData = sessionStore.get(model.id);
-    if (!sessionData) {
-      throw new WebInferError(
-        `ONNX session not found for model ${model.id}`,
-        ErrorCodes.MODEL_NOT_LOADED,
-        { modelId: model.id }
-      );
-    }
+    const data = this.sessionStore.get(model.id);
+    if (!data) throw new Error(`ONNX session not found for model ${model.id}`);
+    if (inputs.length !== data.inputNames.length) throw new Error('Incorrect ONNX input count');
+    return this.runNamed(model, new Map(data.inputNames.map((name, i) => [name, inputs[i]!])));
+  }
 
-    const { session, inputNames, outputNames } = sessionData;
+  async runNamed(model: LoadedModel, inputs: Map<string, Tensor>): Promise<Tensor[]> {
+    const data = this.sessionStore.get(model.id);
+    if (!data || !model.isLoaded) throw new Error(`ONNX session not found for model ${model.id}`);
+    const operation = this.execute(data, inputs);
+    data.active.add(operation);
+    try { return await operation; }
+    finally { data.active.delete(operation); }
+  }
 
+  private async execute(data: ONNXSessionData, inputs: Map<string, Tensor>): Promise<Tensor[]> {
+    const ortModule = await getOrt();
+    const feeds: Record<string, any> = {};
+    let results: Record<string, any> = {};
+    const outputs: Tensor[] = [];
     try {
-      const ortModule = await getOrt();
-      const feeds: Record<string, any> = {};
-      
-      for (let i = 0; i < Math.min(inputs.length, inputNames.length); i++) {
-        const inputName = inputNames[i];
-        const inputTensor = inputs[i] as WebInferTensor;
-        
-        if (inputName && inputTensor) {
-          const dtype = inputTensor.dtype;
-          let ortTensor: any;
-          
-          if (dtype === 'int64') {
-            const data = inputTensor.data as unknown as BigInt64Array;
-            ortTensor = new ortModule.Tensor('int64', data, inputTensor.shape as number[]);
-          } else if (dtype === 'int32') {
-            const data = inputTensor.data as Int32Array;
-            ortTensor = new ortModule.Tensor('int32', data, inputTensor.shape as number[]);
-          } else {
-            const data = inputTensor.toFloat32Array();
-            ortTensor = new ortModule.Tensor('float32', data, inputTensor.shape as number[]);
-          }
-          
-          feeds[inputName] = ortTensor;
-        }
+      for (const name of data.inputNames) {
+        const input = inputs.get(name);
+        if (!input) throw new Error(`Missing ONNX input '${name}'`);
+        feeds[name] = new ortModule.Tensor(input.dtype, (input as WebInferTensor).data, [...input.shape]);
       }
-
-      const results = await session.run(feeds);
-
-      // Convert outputs to WebInferTensor
-      const outputs: Tensor[] = [];
-      
-      for (const outputName of outputNames) {
-        const ortTensor = results[outputName];
-        if (ortTensor) {
-          const data = ortTensor.data as Float32Array;
-          const shape = Array.from(ortTensor.dims).map(d => Number(d));
-          outputs.push(new WebInferTensor(new Float32Array(data), shape, 'float32'));
-        }
+      results = await data.session.run(feeds);
+      for (const name of data.outputNames) {
+        const output = results[name];
+        if (!output) throw new Error(`Missing ONNX output '${name}'`);
+        // Copy before releasing the ORT-owned tensor; preserve integer outputs.
+        outputs.push(new WebInferTensor(output.data.slice(), Array.from(output.dims), output.type as DataType));
       }
-
       return outputs;
     } catch (error) {
-      throw new WebInferError(
-        `ONNX inference failed: ${error instanceof Error ? error.message : String(error)}`,
-        ErrorCodes.INFERENCE_FAILED,
-        { modelId: model.id, error }
-      );
+      outputs.forEach(t => t.dispose());
+      throw new WebInferError(`ONNX inference failed: ${String(error)}`, ErrorCodes.INFERENCE_FAILED, { error });
+    } finally {
+      for (const tensor of [...Object.values(feeds), ...Object.values(results)]) tensor.dispose?.();
     }
   }
 
-  /**
-   * Run inference with named inputs
-   */
-  async runNamed(model: LoadedModel, namedInputs: Map<string, Tensor>): Promise<Tensor[]> {
-    const sessionData = sessionStore.get(model.id);
-    if (!sessionData) {
-      throw new WebInferError(
-        `ONNX session not found for model ${model.id}`,
-        ErrorCodes.MODEL_NOT_LOADED,
-        { modelId: model.id }
-      );
-    }
-
-    const { session, inputNames, outputNames } = sessionData;
-
-    try {
-      const ortModule = await getOrt();
-      const feeds: Record<string, any> = {};
-      
-      for (const [inputName, inputTensor] of namedInputs) {
-        const tensor = inputTensor as WebInferTensor;
-        const dtype = tensor.dtype;
-        let ortTensor: any;
-        
-        if (dtype === 'int64') {
-          const data = tensor.data as unknown as BigInt64Array;
-          ortTensor = new ortModule.Tensor('int64', data, tensor.shape as number[]);
-        } else if (dtype === 'int32') {
-          const data = tensor.data as Int32Array;
-          ortTensor = new ortModule.Tensor('int32', data, tensor.shape as number[]);
-        } else {
-          const data = tensor.toFloat32Array();
-          ortTensor = new ortModule.Tensor('float32', data, tensor.shape as number[]);
-        }
-        
-        feeds[inputName] = ortTensor;
-      }
-
-      const results = await session.run(feeds);
-
-      // Convert outputs to WebInferTensor
-      const outputs: Tensor[] = [];
-      
-      for (const outputName of outputNames) {
-        const ortTensor = results[outputName];
-        if (ortTensor) {
-          const data = ortTensor.data as Float32Array;
-          const shape = Array.from(ortTensor.dims).map(d => Number(d));
-          outputs.push(new WebInferTensor(new Float32Array(data), shape, 'float32'));
-        }
-      }
-
-      return outputs;
-    } catch (error) {
-      throw new WebInferError(
-        `ONNX inference failed: ${error instanceof Error ? error.message : String(error)}`,
-        ErrorCodes.INFERENCE_FAILED,
-        { modelId: model.id, expectedInputs: inputNames, providedInputs: Array.from(namedInputs.keys()), error }
-      );
-    }
+  private unloadModel(modelId: string): Promise<void> {
+    const data = this.sessionStore.get(modelId);
+    if (!data) return Promise.resolve();
+    this.sessionStore.delete(modelId);
+    const release = (async () => {
+      await Promise.allSettled(data.active);
+      await data.session.release();
+    })();
+    this.releases.add(release);
+    // Attach a handler for callers using the synchronous model.dispose API.
+    void release.then(() => this.releases.delete(release), () => undefined);
+    return release;
   }
 
-  /**
-   * Unload a model
-   */
-  private async unloadModel(modelId: string): Promise<void> {
-    const sessionData = sessionStore.get(modelId);
-    if (sessionData) {
-      // Release session will be handled by GC
-      sessionStore.delete(modelId);
-    }
-  }
-
-  /**
-   * Dispose the runtime
-   */
-  dispose(): void {
-    // Clear all sessions
-    sessionStore.clear();
+  async dispose(): Promise<void> {
+    for (const id of this.sessionStore.keys()) void this.unloadModel(id);
+    const releases = [...this.releases];
+    await Promise.all(releases);
+    this.releases.clear();
     this.initialized = false;
   }
 }
 
-/**
- * Create ONNX runtime factory
- */
-export function createONNXRuntime(): Runtime {
-  return new ONNXRuntime();
+export function createONNXRuntime(memory?: MemoryManager): Runtime {
+  return new ONNXRuntime(memory);
 }

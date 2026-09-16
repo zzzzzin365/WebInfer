@@ -46,7 +46,7 @@ export { registerPlugin, getPluginPipeline, getPluginMiddleware, listPlugins, un
 // Device profiling
 export { getDeviceProfile, recommendQuantization, recommendModelVariant, resetDeviceProfile, } from './core/device-profiler.js';
 // Pipeline composition
-export { compose, parallel, } from './core/composer.js';
+export { compose, parallel, } from './pipelines/composer.js';
 // Runtime management
 export { RuntimeManager, LoadedModelImpl, loadModel, loadModelFromBuffer, runInference, runBatchInference, getRuntimeManager, registerRuntime, getBestRuntime, getAvailableRuntimes, } from './core/runtime.js';
 // ============================================================================
@@ -173,4 +173,6 @@ export async function getInfo() {
 }
 import { getAvailableRuntimes } from './core/runtime.js';
 import { ModelDownloadCache } from './utils/cache.js';
+export { InferenceEngine, createInferenceEngine } from './core/engine.js';
+export { TaskScope } from './core/task-scope.js';
 //# sourceMappingURL=index.js.map

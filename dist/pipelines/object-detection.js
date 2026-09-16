@@ -7,7 +7,6 @@ import { BasePipeline, registerPipeline } from './base.js';
 import { WebInferTensor } from '../core/tensor.js';
 import { ImagePreprocessor } from '../utils/preprocessor.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInference } from '../core/runtime.js';
 // ============================================================================
 // Default Model (YOLOS-tiny, quantized)
 // ============================================================================
@@ -58,7 +57,7 @@ export class ObjectDetectionPipeline extends BasePipeline {
         await super.initialize();
         if (!this.onnxModel) {
             const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-            this.onnxModel = await loadModelFromBuffer(modelData);
+            this.onnxModel = await this.inference.loadModelFromBuffer(modelData);
         }
     }
     setLabels(labels) {
@@ -67,7 +66,7 @@ export class ObjectDetectionPipeline extends BasePipeline {
     async run(input, options) {
         await this.initialize();
         const tensorInputs = await this.preprocess(input);
-        const outputs = await this.runModelInference(tensorInputs);
+        const outputs = await this.runModelInference(tensorInputs, options);
         return this.postprocess(outputs, options);
     }
     async preprocess(input) {
@@ -78,8 +77,8 @@ export class ObjectDetectionPipeline extends BasePipeline {
         }
         return [await this.preprocessor.processBatch(inputs)];
     }
-    async runModelInference(inputs) {
-        const outputs = await runInference(this.onnxModel, inputs);
+    async runModelInference(inputs, options) {
+        const outputs = await this.inference.runInference(this.onnxModel, inputs, options);
         return outputs;
     }
     async postprocess(outputs, options) {

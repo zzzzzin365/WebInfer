@@ -1,3 +1,4 @@
+import type { InferenceClient, ExecutionContext } from './inference-client.js';
 /**
  * WebInfer - Core Type Definitions
  * 
@@ -108,7 +109,7 @@ export interface Runtime {
   /** Run inference with named inputs (optional) */
   runNamed?(model: LoadedModel, namedInputs: Map<string, Tensor>): Promise<Tensor[]>;
   /** Dispose the runtime and free resources */
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 // ============================================================================
@@ -335,6 +336,8 @@ export type PipelineTask =
  * Pipeline configuration
  */
 export interface PipelineConfig {
+  /** Explicit engine; omitted only for the legacy singleton API. */
+  engine?: InferenceClient;
   /** Task type */
   task: PipelineTask;
   /** Model ID or path */
@@ -354,7 +357,7 @@ export interface PipelineConfig {
 /**
  * Pipeline options passed during inference
  */
-export interface PipelineOptions {
+export interface PipelineOptions extends ExecutionContext {
   /** Batch size */
   batchSize?: number;
   /** Top K results */

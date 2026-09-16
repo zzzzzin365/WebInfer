@@ -9,7 +9,6 @@ import { WebInferTensor } from '../core/tensor.js';
 import { PipelineConfig, PipelineOptions, LoadedModel } from '../core/types.js';
 import { ImagePreprocessor, type ImageInput } from '../utils/preprocessor.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInference } from '../core/runtime.js';
 
 // ============================================================================
 // Types
@@ -93,7 +92,7 @@ export class ObjectDetectionPipeline extends BasePipeline<ImageInput | ImageInpu
 
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData);
     }
   }
 
@@ -107,7 +106,7 @@ export class ObjectDetectionPipeline extends BasePipeline<ImageInput | ImageInpu
   ): Promise<Detection[]> {
     await this.initialize();
     const tensorInputs = await this.preprocess(input);
-    const outputs = await this.runModelInference(tensorInputs);
+    const outputs = await this.runModelInference(tensorInputs, options);
     return this.postprocess(outputs, options);
   }
 
@@ -126,8 +125,8 @@ export class ObjectDetectionPipeline extends BasePipeline<ImageInput | ImageInpu
     return [await this.preprocessor.processBatch(inputs)];
   }
 
-  private async runModelInference(inputs: WebInferTensor[]): Promise<WebInferTensor[]> {
-    const outputs = await runInference(this.onnxModel!, inputs);
+  private async runModelInference(inputs: WebInferTensor[], options?: PipelineOptions): Promise<WebInferTensor[]> {
+    const outputs = await this.inference.runInference(this.onnxModel!, inputs, options);
     return outputs as WebInferTensor[];
   }
 

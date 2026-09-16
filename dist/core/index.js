@@ -15,8 +15,8 @@ export { RuntimeManager, LoadedModelImpl, loadModel, loadModelFromBuffer, runInf
 export { registerPlugin, getPluginPipeline, getPluginMiddleware, listPlugins, unregisterPlugin, } from './plugin.js';
 // Device Profiler
 export { getDeviceProfile, recommendQuantization, recommendModelVariant, resetDeviceProfile, } from './device-profiler.js';
-// Composer
-export { compose, parallel, } from './composer.js';
 // Worker
 export { InferenceWorker, WorkerPool, getWorkerPool, runInWorker, isWorkerSupported, serializeTensor, deserializeTensor, } from './worker.js';
+export { InferenceEngine, createInferenceEngine } from './engine.js';
+export { TaskScope } from './task-scope.js';
 //# sourceMappingURL=index.js.map

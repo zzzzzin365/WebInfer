@@ -143,7 +143,7 @@ export declare class ImageSegmentationPipeline extends BasePipeline<ImageInput, 
     /**
      * Set and encode the image (call once per image)
      */
-    setImage(image: ImageInput): Promise<void>;
+    setImage(image: ImageInput, options?: PipelineOptions): Promise<void>;
     /**
      * Segment the image with given prompts
      */
@@ -200,7 +200,6 @@ export declare class ImageSegmentationPipeline extends BasePipeline<ImageInput, 
     /**
      * Clear the current image embedding
      */
-    clearImage(): void;
     /**
      * Preprocess (required by BasePipeline)
      */
@@ -212,6 +211,7 @@ export declare class ImageSegmentationPipeline extends BasePipeline<ImageInput, 
     /**
      * Dispose resources
      */
+    clearImage(): void;
     dispose(): void;
 }
 /**

@@ -5,6 +5,7 @@
  * onnxruntime-web is an optional peer dependency loaded dynamically.
  */
 import { Runtime, RuntimeType, RuntimeCapabilities, LoadedModel, ModelLoadOptions, Tensor } from '../core/types.js';
+import { MemoryManager } from '../core/memory.js';
 /**
  * Check whether onnxruntime-web is importable.
  */
@@ -13,7 +14,11 @@ export declare function isOnnxAvailable(): Promise<boolean>;
  * ONNXRuntime - Real ONNX model inference using onnxruntime-web
  */
 export declare class ONNXRuntime implements Runtime {
+    private readonly memory;
     readonly name: RuntimeType;
+    private readonly sessionStore;
+    private readonly releases;
+    constructor(memory?: MemoryManager);
     private initialized;
     private executionProvider;
     get capabilities(): RuntimeCapabilities;
@@ -33,21 +38,10 @@ export declare class ONNXRuntime implements Runtime {
      * Run inference
      */
     run(model: LoadedModel, inputs: Tensor[]): Promise<Tensor[]>;
-    /**
-     * Run inference with named inputs
-     */
-    runNamed(model: LoadedModel, namedInputs: Map<string, Tensor>): Promise<Tensor[]>;
-    /**
-     * Unload a model
-     */
+    runNamed(model: LoadedModel, inputs: Map<string, Tensor>): Promise<Tensor[]>;
+    private execute;
     private unloadModel;
-    /**
-     * Dispose the runtime
-     */
-    dispose(): void;
+    dispose(): Promise<void>;
 }
-/**
- * Create ONNX runtime factory
- */
-export declare function createONNXRuntime(): Runtime;
+export declare function createONNXRuntime(memory?: MemoryManager): Runtime;
 //# sourceMappingURL=onnx.d.ts.map

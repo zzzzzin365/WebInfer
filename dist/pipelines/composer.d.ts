@@ -18,8 +18,8 @@
  * // result.output  = final translation text
  * ```
  */
-import { type PipelineFactoryOptions } from '../pipelines/index.js';
-import type { PipelineTask } from './types.js';
+import { type PipelineFactoryOptions } from './index.js';
+import type { PipelineTask } from '../core/types.js';
 /**
  * A single stage in a composed pipeline.
  */

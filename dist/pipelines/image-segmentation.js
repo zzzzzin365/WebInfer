@@ -6,7 +6,6 @@
  */
 import { WebInferTensor } from '../core/tensor.js';
 import { BasePipeline, registerPipeline } from './base.js';
-import { loadModel, loadModelFromBuffer, runInference, runInferenceNamed } from '../core/runtime.js';
 // ============================================================================
 // Default Model URLs (SlimSAM - quantized for browser)
 // ============================================================================
@@ -84,8 +83,8 @@ export class ImageSegmentationPipeline extends BasePipeline {
                 progress: Math.round((loaded / total) * 100),
             });
         });
-        this.encoderModel = await loadModelFromBuffer(encoderData, {
-            runtime: 'wasm', // Uses ONNXRuntime which auto-detects WebGPU internally
+        this.encoderModel = await this.inference.loadModelFromBuffer(encoderData, {
+            runtime: this.config.runtime,
         });
         // Load decoder
         onProgress?.({ model: 'decoder', loaded: 0, total: 100, progress: 0 });
@@ -97,8 +96,8 @@ export class ImageSegmentationPipeline extends BasePipeline {
                 progress: Math.round((loaded / total) * 100),
             });
         });
-        this.decoderModel = await loadModelFromBuffer(decoderData, {
-            runtime: 'wasm', // Uses ONNXRuntime which auto-detects WebGPU internally
+        this.decoderModel = await this.inference.loadModelFromBuffer(decoderData, {
+            runtime: this.config.runtime,
         });
         this.modelsLoaded = true;
     }
@@ -151,25 +150,26 @@ export class ImageSegmentationPipeline extends BasePipeline {
      * Load encoder model (processes the image once)
      */
     async loadEncoder(modelUrl) {
-        this.encoderModel = await loadModel(modelUrl, {
-            runtime: 'wasm',
+        this.encoderModel = await this.inference.loadModel(modelUrl, {
+            runtime: this.config.runtime,
         });
     }
     /**
      * Load decoder model (processes prompts to generate masks)
      */
     async loadDecoder(modelUrl) {
-        this.decoderModel = await loadModel(modelUrl, {
-            runtime: 'wasm',
+        this.decoderModel = await this.inference.loadModel(modelUrl, {
+            runtime: this.config.runtime,
         });
     }
     /**
      * Set and encode the image (call once per image)
      */
-    async setImage(image) {
+    async setImage(image, options) {
         if (!this.modelsLoaded) {
             throw new Error('Models not loaded. Call loadModels() first.');
         }
+        this.clearImage();
         // Get image data
         const imageData = await this.loadImage(image);
         this.currentImageSize = {
@@ -181,7 +181,7 @@ export class ImageSegmentationPipeline extends BasePipeline {
         this.resizedImageSize = resizedSize;
         // Run encoder
         if (this.encoderModel) {
-            const outputs = await runInference(this.encoderModel, [inputTensor]);
+            const outputs = await this.inference.runInference(this.encoderModel, [inputTensor], options).finally(() => inputTensor.dispose());
             // SlimSAM encoder outputs: [image_embeddings, image_positional_embeddings]
             this.imageEmbedding = outputs[0];
             this.imagePositionalEmbedding = outputs[1];
@@ -219,20 +219,30 @@ export class ImageSegmentationPipeline extends BasePipeline {
             throw new Error('image_positional_embeddings not available from encoder');
         }
         // Run decoder model with named inputs
-        const outputs = await runInferenceNamed(this.decoderModel, decoderInputs);
+        const outputs = await this.inference.runInferenceNamed(this.decoderModel, decoderInputs, options).finally(() => {
+            for (const t of decoderInputs.values()) {
+                if (t !== this.imageEmbedding && t !== this.imagePositionalEmbedding)
+                    t.dispose();
+            }
+        });
         // SAM decoder outputs: [masks, iou_predictions]
         const masks = outputs[0];
         const scores = outputs[1];
         // Post-process masks
-        const result = this.postprocessMasks(masks, scores, maskThreshold, returnAllMasks);
-        result.processingTime = performance.now() - startTime;
-        return result;
+        try {
+            const result = this.postprocessMasks(masks, scores, maskThreshold, returnAllMasks);
+            result.processingTime = performance.now() - startTime;
+            return result;
+        }
+        finally {
+            outputs.forEach(t => t.dispose());
+        }
     }
     /**
      * Run segmentation (implements BasePipeline interface)
      */
     async run(input, options) {
-        await this.setImage(input);
+        await this.setImage(input, options);
         return this.segment(options);
     }
     /**
@@ -475,12 +485,6 @@ export class ImageSegmentationPipeline extends BasePipeline {
     /**
      * Clear the current image embedding
      */
-    clearImage() {
-        this.imageEmbedding = null;
-        this.imagePositionalEmbedding = null;
-        this.currentImageSize = null;
-        this.resizedImageSize = null;
-    }
     /**
      * Preprocess (required by BasePipeline)
      */
@@ -504,7 +508,16 @@ export class ImageSegmentationPipeline extends BasePipeline {
     /**
      * Dispose resources
      */
+    clearImage() {
+        this.imageEmbedding?.dispose();
+        this.imagePositionalEmbedding?.dispose();
+        this.imageEmbedding = null;
+        this.imagePositionalEmbedding = null;
+        this.currentImageSize = null;
+        this.resizedImageSize = null;
+    }
     dispose() {
+        this.clearImage();
         super.dispose();
         this.encoderModel?.dispose();
         this.decoderModel?.dispose();

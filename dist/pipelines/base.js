@@ -1,9 +1,4 @@
-/**
- * WebInfer - Base Pipeline
- *
- * Base class and utilities for all pipeline implementations.
- */
-import { loadModel, runInference } from '../core/runtime.js';
+import * as legacyInference from '../core/runtime.js';
 import { ModelCache } from '../core/memory.js';
 import { ModelDownloadCache } from '../utils/cache.js';
 // ============================================================================
@@ -13,6 +8,7 @@ import { ModelDownloadCache } from '../utils/cache.js';
  * BasePipeline - Abstract base class for all pipelines
  */
 export class BasePipeline {
+    inference;
     model = null;
     config;
     modelCache;
@@ -20,6 +16,7 @@ export class BasePipeline {
     isReady = false;
     constructor(config) {
         this.config = config;
+        this.inference = config.engine ?? legacyInference;
         this.modelCache = new ModelCache();
         this.downloadCache = new ModelDownloadCache();
     }
@@ -71,7 +68,7 @@ export class BasePipeline {
             // Ignore fetch errors for demo
         }
         // Load into runtime
-        return loadModel(modelPath, {
+        return this.inference.loadModel(modelPath, {
             runtime: this.config.runtime,
             quantization: this.config.quantization,
             cache: this.config.cache,
@@ -86,7 +83,7 @@ export class BasePipeline {
         // Preprocess
         const preprocessed = await this.preprocess(input);
         // Run inference
-        const outputs = await runInference(this.model, preprocessed);
+        const outputs = await this.inference.runInference(this.model, preprocessed, options);
         // Postprocess
         const result = await this.postprocess(outputs, options);
         if (result && typeof result === 'object' && 'processingTime' in result) {

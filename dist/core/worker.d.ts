@@ -3,7 +3,7 @@
  *
  * Run inference in a Web Worker to avoid blocking the main thread.
  */
-import type { Tensor, RuntimeType } from './types.js';
+import type { Tensor, RuntimeType, TypedArray, DataType } from './types.js';
 /**
  * Worker message types
  */
@@ -54,6 +54,7 @@ export interface WorkerPoolOptions {
  * Serialize a tensor for transfer to worker
  */
 export declare function serializeTensor(tensor: Tensor): SerializedTensor;
+export declare function tensorData(serialized: SerializedTensor): TypedArray;
 /**
  * Deserialize a tensor from worker.
  * Uses a lazy import to avoid circular dependency issues.
@@ -63,7 +64,7 @@ export declare function deserializeTensor(serialized: SerializedTensor): Promise
  * Synchronous deserialisation used internally where async is not feasible.
  * Requires WebInferTensor to be passed in to avoid require().
  */
-export declare function deserializeTensorSync(serialized: SerializedTensor, TensorClass: new (data: Float32Array, shape: number[], dtype: string) => Tensor): Tensor;
+export declare function deserializeTensorSync(serialized: SerializedTensor, TensorClass: new (data: TypedArray, shape: number[], dtype: DataType) => Tensor): Tensor;
 export type WorkerHealthState = 'alive' | 'dead' | 'restarting';
 /**
  * InferenceWorker - Wrapper for a single Web Worker with auto-restart

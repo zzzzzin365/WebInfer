@@ -18,7 +18,7 @@
  * // result.output  = final translation text
  * ```
  */
-import { pipeline } from '../pipelines/index.js';
+import { pipeline } from './index.js';
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------

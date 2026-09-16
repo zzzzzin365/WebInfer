@@ -13,7 +13,6 @@ import {
 import { WebInferTensor, softmax } from '../core/tensor.js';
 import { Tokenizer } from '../utils/tokenizer.js';
 import { loadModelData } from '../utils/model-loader.js';
-import { loadModelFromBuffer, runInferenceNamed } from '../core/runtime.js';
 import {
   BasePipeline,
   TextClassificationResult,
@@ -60,16 +59,21 @@ export class TextClassificationPipeline extends BasePipeline<
   }
 
   override async initialize(): Promise<void> {
-    await super.initialize();
-
     if (!this.tokenizer) {
       this.tokenizer = await Tokenizer.fromUrl(this.tokenizerUrl);
     }
 
     if (!this.onnxModel) {
       const modelData = await loadModelData(this.modelUrl, { cache: this.config.cache ?? true });
-      this.onnxModel = await loadModelFromBuffer(modelData);
+      this.onnxModel = await this.inference.loadModelFromBuffer(modelData, { runtime: this.config.runtime });
     }
+    this.isReady = true;
+  }
+
+  override dispose(): void {
+    this.onnxModel?.dispose();
+    this.onnxModel = null;
+    super.dispose();
   }
 
   setLabels(labels: string[]): void {
@@ -90,9 +94,14 @@ export class TextClassificationPipeline extends BasePipeline<
 
     for (const text of inputs) {
       const tensorInputs = await this.preprocess(text);
-      const outputs = await this.runInference(tensorInputs);
-      const result = await this.postprocess(outputs, options);
-      results.push(result);
+      let outputs: WebInferTensor[] = [];
+      try {
+        outputs = await this.runInference(tensorInputs, options);
+        results.push(await this.postprocess(outputs, options));
+      } finally {
+        tensorInputs.forEach(t => t.dispose());
+        outputs.forEach(t => t.dispose());
+      }
     }
 
     const processingTime = performance.now() - startTime;
@@ -127,12 +136,12 @@ export class TextClassificationPipeline extends BasePipeline<
     return [inputIds, attentionMask];
   }
 
-  private async runInference(inputs: WebInferTensor[]): Promise<WebInferTensor[]> {
+  private async runInference(inputs: WebInferTensor[], options?: PipelineOptions): Promise<WebInferTensor[]> {
     const namedInputs = new Map<string, WebInferTensor>();
     namedInputs.set('input_ids', inputs[0]!);
     namedInputs.set('attention_mask', inputs[1]!);
 
-    const outputs = await runInferenceNamed(this.onnxModel!, namedInputs);
+    const outputs = await this.inference.runInferenceNamed(this.onnxModel!, namedInputs, options);
     return outputs as WebInferTensor[];
   }
 
@@ -147,6 +156,7 @@ export class TextClassificationPipeline extends BasePipeline<
 
     const probs = softmax(logits, -1) as WebInferTensor;
     const probsArray = probs.toFloat32Array();
+    probs.dispose();
 
     let maxIdx = 0;
     let maxScore = probsArray[0] ?? 0;
